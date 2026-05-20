@@ -50,14 +50,42 @@ async function fulfillJson(route: Route, body: unknown): Promise<void> {
   });
 }
 
+const crowdedIssues = Array.from({ length: 12 }, (_, index) => {
+  const n = index + 1;
+  return {
+    id: `issue-${n}`,
+    title: `Issue ${n}`,
+    status: "open",
+    pipeline_stage: "intake",
+    lifecycle_state: "intake",
+  };
+});
+
+const crowdedRecent = Array.from({ length: 8 }, (_, index) => {
+  const n = index + 1;
+  return {
+    ref: { kind: "wiki-page", path: `recent-page-${n}` },
+    label: `Recent page ${n}`,
+    href: `/wiki/recent-page-${n}`,
+    visitedAtMs: 1_700_000_000_000 + n,
+  };
+});
+
 async function stubCrowdedSidebarData(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+  await page.addInitScript((recent) => {
     localStorage.setItem(
       "wuphf-sidebar-sections",
-      JSON.stringify({ agents: true, channels: true, apps: true }),
+      JSON.stringify({
+        agents: true,
+        channels: true,
+        issues: true,
+        apps: true,
+        recent: true,
+      }),
     );
+    localStorage.setItem("wuphf-recent-objects", JSON.stringify(recent));
     localStorage.removeItem("wuphf-sidebar-bg");
-  });
+  }, crowdedRecent);
 
   await page.route("**/api/office-members*", (route) =>
     fulfillJson(route, { members: crowdedMembers }),
@@ -70,6 +98,9 @@ async function stubCrowdedSidebarData(page: Page): Promise<void> {
   );
   await page.route(/\/api\/review\/list(?:\?|$)/, (route) =>
     fulfillJson(route, { reviews: [] }),
+  );
+  await page.route(/\/api\/tasks(?:\?|$)/, (route) =>
+    fulfillJson(route, { tasks: crowdedIssues }),
   );
 }
 
@@ -117,52 +148,60 @@ async function waitForScrollSettle(section: Locator): Promise<void> {
   );
 }
 
+/**
+ * The sidebar refactor (PR #919) collapsed per-section scroll regions
+ * into one parent scroll container `.sidebar-scroll`. Sections themselves
+ * now hug their content; reachability is verified by wheel-scrolling
+ * `.sidebar-scroll` until each target is in viewport.
+ */
 async function expectWheelCanReach(
   page: Page,
-  section: Locator,
   label: string,
   targets: Locator[],
 ): Promise<void> {
-  await expect(
-    section,
-    `${label} scroll region should be visible`,
-  ).toBeVisible();
-  await section.evaluate((el) => {
+  const scroll = page.locator(".sidebar-scroll");
+  await expect(scroll, "sidebar scroll region should be visible").toBeVisible();
+  await scroll.evaluate((el) => {
     el.scrollTop = 0;
   });
 
-  const before = await scrollMetrics(section);
+  const before = await scrollMetrics(scroll);
   expect(
     before.scrollHeight,
-    `${label} should overflow in the crowded sidebar fixture`,
+    `sidebar should overflow in the crowded fixture (${label})`,
   ).toBeGreaterThan(before.clientHeight + 1);
   expect(
     ["auto", "scroll"].includes(before.overflowY),
-    `${label} should own vertical scrolling, found overflow-y: ${before.overflowY}`,
+    `sidebar-scroll should own vertical scrolling, found overflow-y: ${before.overflowY}`,
   ).toBe(true);
 
-  await section.hover();
-  for (let i = 0; i < 8; i += 1) {
-    await page.mouse.wheel(0, 1600);
-    await waitForScrollSettle(section);
-    const current = await scrollMetrics(section);
-    if (current.scrollTop + current.clientHeight >= current.scrollHeight - 2) {
-      break;
-    }
-  }
-
-  const after = await scrollMetrics(section);
-  expect(
-    after.scrollTop,
-    `${label} should respond to wheel scrolling`,
-  ).toBeGreaterThan(0);
-  expect(
-    after.scrollTop + after.clientHeight,
-    `${label} should scroll to its last items`,
-  ).toBeGreaterThanOrEqual(after.scrollHeight - 2);
-
+  await scroll.hover();
   for (const target of targets) {
-    await expect(target).toBeInViewport({ ratio: 0.2 });
+    for (let i = 0; i < 24; i += 1) {
+      const isInView = await target.evaluate((el) => {
+        const container = el.closest(".sidebar-scroll");
+        if (container === null) return false;
+        const containerRect = container.getBoundingClientRect();
+        const rect = el.getBoundingClientRect();
+        return (
+          rect.top >= containerRect.top && rect.bottom <= containerRect.bottom
+        );
+      });
+      if (isInView) break;
+      await page.mouse.wheel(0, 600);
+      await waitForScrollSettle(scroll);
+      const current = await scrollMetrics(scroll);
+      if (
+        current.scrollTop + current.clientHeight >=
+        current.scrollHeight - 2
+      ) {
+        break;
+      }
+    }
+    await expect(
+      target,
+      `${label} target should be reachable by scrolling .sidebar-scroll`,
+    ).toBeInViewport({ ratio: 0.2 });
   }
 }
 
@@ -191,24 +230,100 @@ test.describe("left sidebar scrolling", () => {
       const appItems = page.locator(".sidebar-apps button.sidebar-item");
       await expect(appItems.first()).toBeVisible();
 
-      await expectWheelCanReach(page, page.locator(".sidebar-agents"), "Team", [
+      await expectWheelCanReach(page, "Team", [
         page.locator('button[data-agent-slug="agent-24"]'),
         page.locator(".sidebar-agents .sidebar-add-btn"),
       ]);
-      await expectWheelCanReach(
-        page,
-        page.locator(".sidebar-channels"),
-        "Channels",
-        [
-          page.getByRole("button", { name: "Channel 24" }),
-          page.locator(".sidebar-channels .sidebar-add-btn"),
-        ],
-      );
-      await expectWheelCanReach(page, page.locator(".sidebar-apps"), "Apps", [
-        appItems.last(),
+      await expectWheelCanReach(page, "Channels", [
+        page.getByRole("button", { name: "Channel 24" }),
+        page.locator(".sidebar-channels .sidebar-add-btn"),
+      ]);
+      await expectWheelCanReach(page, "Issues", [
+        page.locator(".sidebar-issues .sidebar-item").first(),
+        page.locator(".sidebar-issues .sidebar-add-btn"),
+      ]);
+      await expectWheelCanReach(page, "Apps", [appItems.last()]);
+      await expectWheelCanReach(page, "Recent", [
+        page.locator(".sidebar-recent .sidebar-item").first(),
       ]);
 
       await expectNoReactErrors(page, getErrors, "while scrolling the sidebar");
+    });
+
+    test(`section header pins data-stuck when scrolled past at ${viewport.width}x${viewport.height}`, async ({
+      page,
+    }) => {
+      const getErrors = collectReactErrors(page);
+      await page.setViewportSize(viewport);
+      await stubCrowdedSidebarData(page);
+
+      await page.goto("/");
+      await waitForReactMount(page);
+
+      const scroll = page.locator(".sidebar-scroll");
+      await expect(scroll).toBeVisible();
+      // Each section's title bar is the sticky chrome; we want to assert
+      // that scrolling far enough flips data-stuck on the title bar of a
+      // later section (Tools) which only pins once Channels has fully
+      // slid behind it.
+      const channelsTitleBar = page
+        .locator(".sidebar-section", { has: page.getByText("Channels") })
+        .locator(".sidebar-section-title-bar");
+      await expect(channelsTitleBar).toBeVisible();
+      // Pre-scroll: no headers should be stuck except possibly the very
+      // first (Agents). Channels is mid-list, so it should read false.
+      await expect(channelsTitleBar).toHaveAttribute("data-stuck", "false");
+
+      // Scroll far enough that Channels' header has reached the top of
+      // .sidebar-scroll. The crowded fixture has 24 agents above it; a
+      // generous wheel push lands us safely past that.
+      await scroll.hover();
+      for (let i = 0; i < 12; i += 1) {
+        const stuck = await channelsTitleBar.getAttribute("data-stuck");
+        if (stuck === "true") break;
+        await page.mouse.wheel(0, 800);
+        await waitForScrollSettle(scroll);
+      }
+      await expect(channelsTitleBar).toHaveAttribute("data-stuck", "true");
+
+      await expectNoReactErrors(
+        page,
+        getErrors,
+        "while asserting sticky pin behavior",
+      );
+    });
+
+    test(`collapsed section body is removed from a11y tree and tab order at ${viewport.width}x${viewport.height}`, async ({
+      page,
+    }) => {
+      const getErrors = collectReactErrors(page);
+      await page.setViewportSize(viewport);
+      await stubCrowdedSidebarData(page);
+
+      await page.goto("/");
+      await waitForReactMount(page);
+
+      // Collapse the Channels section.
+      const channelsToggle = page
+        .locator(".sidebar-section", { has: page.getByText("Channels") })
+        .locator("button.sidebar-section-toggle");
+      await expect(channelsToggle).toHaveAttribute("aria-expanded", "true");
+      await channelsToggle.click();
+      await expect(channelsToggle).toHaveAttribute("aria-expanded", "false");
+
+      // The collapsible body should be marked inert and aria-hidden so
+      // screen readers skip it and Tab can't land on its buttons.
+      const channelsBody = page
+        .locator(".sidebar-section", { has: page.getByText("Channels") })
+        .locator(".sidebar-collapsible");
+      await expect(channelsBody).toHaveAttribute("aria-hidden", "true");
+      await expect(channelsBody).toHaveAttribute("inert", "");
+
+      await expectNoReactErrors(
+        page,
+        getErrors,
+        "while asserting collapsed-section a11y",
+      );
     });
   }
 });

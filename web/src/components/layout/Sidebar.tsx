@@ -2,7 +2,7 @@ import { Settings as SettingsIcon, SidebarCollapse } from "iconoir-react";
 
 import { useResizablePane } from "../../hooks/useResizablePane";
 import { router } from "../../lib/router";
-import { useCurrentApp } from "../../routes/useCurrentRoute";
+import { useCurrentApp, useCurrentRoute } from "../../routes/useCurrentRoute";
 import { useAppStore } from "../../stores/app";
 import { TeamMemberBadge } from "../join/TeamMemberBadge";
 import { SidebarPreviewOverlay } from "../onboarding/SidebarPreviewOverlay";
@@ -11,56 +11,20 @@ import { AppList } from "../sidebar/AppList";
 import { ChannelList } from "../sidebar/ChannelList";
 import { InboxButton } from "../sidebar/InboxButton";
 import { IssuesGroup } from "../sidebar/IssuesGroup";
-import { RecentObjectsPanel } from "../sidebar/RecentObjectsPanel";
-import { SidebarColorPicker } from "../sidebar/SidebarColorPicker";
+import {
+  hasRecentObjects,
+  RecentObjectsPanel,
+} from "../sidebar/RecentObjectsPanel";
+import { SidebarSection } from "../sidebar/SidebarSection";
 import { UsagePanel } from "../sidebar/UsagePanel";
 import { WorkspaceSummary } from "../sidebar/WorkspaceSummary";
 import { CollapsedSidebar } from "./CollapsedSidebar";
 import { PaneResizeHandle } from "./PaneResizeHandle";
 
-export const SIDEBAR_DEFAULT_WIDTH = 220;
+export const SIDEBAR_DEFAULT_WIDTH = 280;
 export const SIDEBAR_MIN_WIDTH = 180;
 export const SIDEBAR_MAX_WIDTH = 420;
 export const SIDEBAR_WIDTH_STORAGE_KEY = "wuphf-sidebar-width";
-
-function SectionToggle({
-  label,
-  open,
-  onToggle,
-}: {
-  label: string;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="sidebar-section-title sidebar-section-toggle"
-      onClick={onToggle}
-      aria-expanded={open}
-    >
-      <span>{label}</span>
-      <svg
-        aria-hidden="true"
-        focusable="false"
-        style={{
-          width: 10,
-          height: 10,
-          transform: open ? "rotate(90deg)" : "rotate(0deg)",
-          transition: "transform 0.15s",
-        }}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="m9 18 6-6-6-6" />
-      </svg>
-    </button>
-  );
-}
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Existing cognitive complexity is baselined for a focused follow-up refactor.
 export function Sidebar() {
@@ -72,10 +36,14 @@ export function Sidebar() {
   const toggleSidebarIssues = useAppStore((s) => s.toggleSidebarIssues);
   const sidebarAppsOpen = useAppStore((s) => s.sidebarAppsOpen);
   const toggleSidebarApps = useAppStore((s) => s.toggleSidebarApps);
+  const sidebarRecentOpen = useAppStore((s) => s.sidebarRecentOpen);
+  const toggleSidebarRecent = useAppStore((s) => s.toggleSidebarRecent);
+  const showRecent = hasRecentObjects();
   const sidebarCollapsed = useAppStore((s) => s.sidebarCollapsed);
   const toggleSidebarCollapsed = useAppStore((s) => s.toggleSidebarCollapsed);
-  const sidebarBg = useAppStore((s) => s.sidebarBg);
   const currentApp = useCurrentApp();
+  const route = useCurrentRoute();
+  const issuesListActive = route.kind === "issues-list";
 
   const resize = useResizablePane({
     storageKey: SIDEBAR_WIDTH_STORAGE_KEY,
@@ -90,17 +58,14 @@ export function Sidebar() {
   // property rather than `width:` directly so the mobile media queries
   // (which clamp the sidebar to 240px / full overlay) can still win
   // — inline `width` would beat them with normal cascade rules.
-  const asideStyle = {
-    ...(sidebarBg ? { background: sidebarBg } : null),
-    ...(sidebarCollapsed
-      ? null
-      : { "--sidebar-resize-width": `${resize.width}px` }),
-  } as React.CSSProperties;
+  const asideStyle = (
+    sidebarCollapsed ? null : { "--sidebar-resize-width": `${resize.width}px` }
+  ) as React.CSSProperties | null;
 
   return (
     <aside
       className={`sidebar${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
-      style={asideStyle}
+      style={asideStyle ?? undefined}
     >
       {sidebarCollapsed ? (
         <CollapsedSidebar />
@@ -140,74 +105,73 @@ export function Sidebar() {
             <InboxButton />
           </div>
 
-          <div
-            className={`sidebar-section is-team${sidebarAgentsOpen ? "" : " is-collapsed"}`}
-          >
-            <SectionToggle
+          <div className="sidebar-scroll">
+            <SidebarSection
               label="Agents"
+              variant="team"
               open={sidebarAgentsOpen}
               onToggle={toggleSidebarAgents}
-            />
-          </div>
-          <div
-            className={`sidebar-collapsible${sidebarAgentsOpen ? " is-open" : ""}`}
-          >
-            <AgentList />
-          </div>
+            >
+              <AgentList />
+            </SidebarSection>
 
-          <div
-            className={`sidebar-section${sidebarChannelsOpen ? "" : " is-collapsed"}`}
-          >
-            <SectionToggle
+            <SidebarSection
               label="Channels"
               open={sidebarChannelsOpen}
               onToggle={toggleSidebarChannels}
-            />
-          </div>
-          <div
-            className={`sidebar-collapsible${sidebarChannelsOpen ? " is-open" : ""}`}
-          >
-            <ChannelList />
-          </div>
+            >
+              <ChannelList />
+            </SidebarSection>
 
-          {/* Phase 3 — Issues group (between Channels and Tools, per spec Surface 2 layout). */}
-          <div
-            className={`sidebar-section${sidebarIssuesOpen ? "" : " is-collapsed"}`}
-          >
-            <IssuesGroup
+            {/* Phase 3 — Issues group (between Channels and Tools, per spec Surface 2 layout). */}
+            <SidebarSection
+              label="Issues"
               open={sidebarIssuesOpen}
               onToggle={toggleSidebarIssues}
-            />
-          </div>
-          <div
-            className={`sidebar-collapsible${sidebarIssuesOpen ? " is-open" : ""}`}
-          >
-            {/* Issue list rows are rendered inside IssuesGroup when open */}
-          </div>
+              data-testid="issues-group-header"
+              headerActions={
+                <button
+                  type="button"
+                  className={`sidebar-section-action${issuesListActive ? " active" : ""}`}
+                  onClick={() => void router.navigate({ to: "/issues" })}
+                  title="View all issues"
+                  data-testid="issues-sidebar-view-all"
+                >
+                  View all
+                </button>
+              }
+            >
+              <IssuesGroup open={sidebarIssuesOpen} />
+            </SidebarSection>
 
-          <div
-            className={`sidebar-section${sidebarAppsOpen ? "" : " is-collapsed"}`}
-          >
-            <SectionToggle
+            <SidebarSection
               label="Tools"
               open={sidebarAppsOpen}
               onToggle={toggleSidebarApps}
-            />
-          </div>
-          <div
-            className={`sidebar-collapsible${sidebarAppsOpen ? " is-open" : ""}`}
-          >
-            <AppList />
-          </div>
+            >
+              <AppList />
+            </SidebarSection>
 
-          {/* Phase 2 onboarding preview overlay — shows staged channels/agents
-              forming as the user answers CEO questions. Hidden once onboarded. */}
-          <SidebarPreviewOverlay />
+            {/* Phase 2 onboarding preview overlay — shows staged channels/agents
+                forming as the user answers CEO questions. Hidden once onboarded. */}
+            <SidebarPreviewOverlay />
 
-          <RecentObjectsPanel />
-          <WorkspaceSummary />
+            {showRecent && (
+              <SidebarSection
+                label="Recent"
+                open={sidebarRecentOpen}
+                onToggle={toggleSidebarRecent}
+              >
+                <RecentObjectsPanel />
+              </SidebarSection>
+            )}
+          </div>
+          {/* WorkspaceSummary intentionally not rendered here — the stats
+              it shows (agents active, tasks open, tokens) are redundant
+              with the Agents/Issues sections and the Usage footer. The
+              component file is preserved so it can be re-used inside a
+              future Usage popover or Settings surface. */}
           <UsagePanel />
-          <SidebarColorPicker />
         </>
       )}
       {!sidebarCollapsed && (
