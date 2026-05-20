@@ -102,7 +102,10 @@ export {
   foldApprovalFromLog,
   statusForDecision,
 } from "./projections.ts";
+export type { ApprovalProjectionSnapshotRow, ApprovalReplayEventRow } from "./rebuild/index.ts";
 export {
   ApprovalRebuildThreadProjectionNotReadyError,
   rebuildApprovalsProjectionFromLog,
+  replayApprovalsProjectionSnapshot,
+  snapshotApprovalsProjection,
 } from "./rebuild/index.ts";

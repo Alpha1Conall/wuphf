@@ -33,6 +33,7 @@ const SYSTEM_INBOX_EXTERNAL_REFS: ThreadExternalRefs = Object.freeze({
 const THREAD_REBUILD_BATCH_SIZE = 500;
 
 export interface ThreadSubsystem {
+  readonly db: Database.Database;
   readonly appender: ThreadAppender;
   readonly state: ThreadStateStore;
   readonly receiptIndex: ThreadReceiptIndexStore;
@@ -56,6 +57,7 @@ export function createThreadSubsystem(
   const views = createThreadViewStore(db, state, receiptIndex);
   const appender = createThreadAppender(db, eventLog, state);
   ensureSystemInboxThread(appender, state);
+  receiptStore.setDefaultThreadIdForThreadlessReceipts(SYSTEM_INBOX_THREAD_ID);
   const rebuildTransaction = db.transaction((fromLsn: number): void => {
     if (!Number.isSafeInteger(fromLsn) || fromLsn < 0) {
       throw new Error(
@@ -81,6 +83,7 @@ export function createThreadSubsystem(
     }
   });
   return {
+    db,
     appender,
     state,
     receiptIndex,

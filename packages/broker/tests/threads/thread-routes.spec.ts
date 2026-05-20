@@ -30,6 +30,7 @@ import {
   threadListResponseFromJson,
   threadMutationResponseFromJson,
   threadPinnedApprovalsResponseFromJson,
+  threadReplayCheckReportFromJson,
   threadSpecContentHash,
   validateThreadStreamEvent,
 } from "@wuphf/protocol";
@@ -470,6 +471,7 @@ describe("/api/v1/threads routes", () => {
     if (fixture === null) throw new Error("fixture missing");
     const routeChecks = [
       fetch(`${fixture.broker.url}/api/v1/threads`),
+      fetch(`${fixture.broker.url}/api/v1/threads/replay-check`),
       fetch(`${fixture.broker.url}/api/v1/threads/${THREAD_ID}`),
       fetch(`${fixture.broker.url}/api/v1/threads/${THREAD_ID}/pinned-approvals`),
       fetch(`${fixture.broker.url}/api/v1/threads/${THREAD_ID}/receipts`),
@@ -487,7 +489,7 @@ describe("/api/v1/threads routes", () => {
       }),
     ];
     const responses = await Promise.all(routeChecks);
-    expect(responses.map((res) => res.status)).toEqual([401, 401, 401, 401, 401, 401, 401]);
+    expect(responses.map((res) => res.status)).toEqual([401, 401, 401, 401, 401, 401, 401, 401]);
   });
 
   it("runs the loopback Host guard before every thread route", async () => {
@@ -497,6 +499,13 @@ describe("/api/v1/threads routes", () => {
       rawRequest({
         port: fixture.broker.port,
         path: "/api/v1/threads",
+        method: "GET",
+        hostHeader: "evil.example.com",
+        authorization: `Bearer ${TOKEN}`,
+      }),
+      rawRequest({
+        port: fixture.broker.port,
+        path: "/api/v1/threads/replay-check",
         method: "GET",
         hostHeader: "evil.example.com",
         authorization: `Bearer ${TOKEN}`,
@@ -547,7 +556,7 @@ describe("/api/v1/threads routes", () => {
         body: JSON.stringify(statusBody()),
       }),
     ]);
-    expect(checks.map((res) => res.status)).toEqual([403, 403, 403, 403, 403, 403, 403]);
+    expect(checks.map((res) => res.status)).toEqual([403, 403, 403, 403, 403, 403, 403, 403]);
   });
 
   it("returns structured errors for unsupported thread methods and bad paths", async () => {
@@ -751,6 +760,58 @@ describe("/api/v1/threads routes", () => {
     expect(closed.status).toBe(200);
     const closedBody = (await closed.json()) as { readonly threads: readonly unknown[] };
     expect(closedBody.threads).toHaveLength(1);
+  });
+
+  it("serves replay-check as a literal route before the thread id route", async () => {
+    if (fixture === null) throw new Error("fixture missing");
+    await createThread(fixture);
+    await fixture.receiptStore.put(
+      minimalReceiptV2("01JRZ3NDEKTSV4RRFFQ69G5FJ0", APPROVAL_TASK_ID),
+    );
+    await createApproval(fixture, {
+      threadId: asThreadId(THREAD_ID),
+      taskId: APPROVAL_TASK_ID,
+    });
+
+    const res = await fetch(`${fixture.broker.url}/api/v1/threads/replay-check`, {
+      headers: authHeaders(),
+    });
+    expect(res.status).toBe(200);
+    const report = threadReplayCheckReportFromJson((await res.json()) as unknown);
+    expect(report.ok).toBe(true);
+    expect(report.discrepancies).toEqual([]);
+    expect(report.eventsScanned).toBeGreaterThan(0);
+  });
+
+  it("replay-check reports pinned approval projection drift", async () => {
+    if (fixture === null) throw new Error("fixture missing");
+    await createThread(fixture);
+    await createApproval(fixture, {
+      threadId: asThreadId(THREAD_ID),
+      taskId: APPROVAL_TASK_ID,
+    });
+    fixture.db
+      .prepare("DELETE FROM pending_approvals WHERE approval_id = ?")
+      .run(APPROVAL_REQUEST_ID);
+
+    const res = await fetch(`${fixture.broker.url}/api/v1/threads/replay-check`, {
+      headers: authHeaders(),
+    });
+    expect(res.status).toBe(500);
+    const report = threadReplayCheckReportFromJson((await res.json()) as unknown);
+    expect(report.ok).toBe(false);
+    expect(report.discrepancies).toContainEqual({
+      kind: "thread_pinned_approvals_mismatch",
+      threadId: THREAD_ID,
+      replayed: {
+        approvalIds: [APPROVAL_REQUEST_ID],
+        headLsn: expect.any(String),
+      },
+      stored: {
+        approvalIds: [],
+        headLsn: null,
+      },
+    });
   });
 
   it("paginates canonical thread receipts and keeps thread task ids de-duped", async () => {
