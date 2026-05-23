@@ -43,16 +43,22 @@ vi.mock("../../api/client", async () => {
     await vi.importActual<typeof import("../../api/client")>(
       "../../api/client",
     );
-  return { ...actual, get: vi.fn(), post: vi.fn() };
+  return {
+    ...actual,
+    get: vi.fn(),
+    post: vi.fn(),
+    postMessage: vi.fn(),
+  };
 });
 
 vi.mock("../../hooks/useRequests", () => ({
   useRequests: () => ({ pending: [] }),
 }));
 
-import { post } from "../../api/client";
+import { post, postMessage } from "../../api/client";
 
 const postMock = vi.mocked(post);
+const postMessageMock = vi.mocked(postMessage);
 
 // ── Context helper ────────────────────────────────────────────────────────
 
@@ -76,6 +82,14 @@ function makeWrapper(suggestion: CeoSuggestion | null) {
 beforeEach(() => {
   postMock.mockReset();
   postMock.mockResolvedValue({});
+  postMessageMock.mockReset();
+  postMessageMock.mockResolvedValue({
+    id: "msg-stub",
+    from: "human",
+    channel: "ceo__human",
+    content: "",
+    timestamp: new Date().toISOString(),
+  });
 });
 
 afterEach(() => {
@@ -406,6 +420,81 @@ describe("CeoScanChip", () => {
     expect(chip.textContent).toContain("read that URL");
   });
 
+  it("surfaces the error reason inline on failure (#934)", () => {
+    const payload: CeoScanChipPayload = {
+      field: "website_url",
+      url: "acme.com",
+      status: "failed",
+      error_reason: "URL fetch failed: 404 Not Found",
+    };
+    render(<CeoScanChip payload={payload} />);
+    expect(screen.getByTestId("ceo-scan-chip-reason")).toHaveTextContent(
+      "URL fetch failed: 404 Not Found",
+    );
+  });
+
+  it("renders Try another URL and Skip CTAs on failure (#934)", () => {
+    const payload: CeoScanChipPayload = {
+      field: "website_url",
+      url: "acme.com",
+      status: "failed",
+    };
+    render(<CeoScanChip payload={payload} />);
+    expect(screen.getByTestId("ceo-scan-chip-retry")).toBeInTheDocument();
+    expect(screen.getByTestId("ceo-scan-chip-skip")).toBeInTheDocument();
+  });
+
+  it("does NOT render CTAs on the scanning or done chip", () => {
+    const scanning: CeoScanChipPayload = {
+      field: "website_url",
+      url: "acme.com",
+      status: "scanning",
+    };
+    const { unmount } = render(<CeoScanChip payload={scanning} />);
+    expect(screen.queryByTestId("ceo-scan-chip-actions")).toBeNull();
+    unmount();
+
+    const done: CeoScanChipPayload = {
+      field: "website_url",
+      url: "acme.com",
+      status: "done",
+    };
+    render(<CeoScanChip payload={done} />);
+    expect(screen.queryByTestId("ceo-scan-chip-actions")).toBeNull();
+  });
+
+  it("clicking Try another URL transitions back to PhaseWebsite (#934)", async () => {
+    postMock.mockResolvedValue({ ok: true, phase: "website" });
+    const payload: CeoScanChipPayload = {
+      field: "website_url",
+      url: "acme.com",
+      status: "failed",
+    };
+    render(<CeoScanChip payload={payload} />);
+    fireEvent.click(screen.getByTestId("ceo-scan-chip-retry"));
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith("/onboarding/transition", {
+        phase: "website",
+      }),
+    );
+  });
+
+  it("clicking Skip and continue transitions to PhaseBlueprint (#934)", async () => {
+    postMock.mockResolvedValue({ ok: true, phase: "blueprint" });
+    const payload: CeoScanChipPayload = {
+      field: "website_url",
+      url: "acme.com",
+      status: "failed",
+    };
+    render(<CeoScanChip payload={payload} />);
+    fireEvent.click(screen.getByTestId("ceo-scan-chip-skip"));
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith("/onboarding/transition", {
+        phase: "blueprint",
+      }),
+    );
+  });
+
   it("uses custom labels when provided", () => {
     const payload: CeoScanChipPayload = {
       field: "website_url",
@@ -651,6 +740,128 @@ describe("CeoCardSection", () => {
     };
     render(<CeoCardSection />, { wrapper: makeWrapper(suggestion) });
     expect(screen.getByTestId("ceo-scan-chip")).toBeInTheDocument();
+  });
+
+  // ── Human-echo (#978) ──────────────────────────────────────────────────
+  //
+  // After the user commits a form-field / chip / checklist answer, the
+  // wizard mirrors that answer back into the CEO DM as a human chat bubble
+  // so the transcript reads like a real conversation. The non-conversational
+  // bridge_choice action is excluded.
+
+  it("echoes a form-field answer into the CEO DM after submit", async () => {
+    const suggestion: CeoSuggestion = {
+      id: "sug-echo-form",
+      phase: "greet",
+      kind: "ceo_form_field",
+      payload: { field: "company_name", label: "Office name?" },
+    };
+    render(<CeoCardSection />, { wrapper: makeWrapper(suggestion) });
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "Acme Test QA" },
+    });
+    fireEvent.click(screen.getByText("Submit"));
+
+    await waitFor(() =>
+      expect(postMessageMock).toHaveBeenCalledWith(
+        "Acme Test QA",
+        "ceo__human",
+      ),
+    );
+  });
+
+  it("echoes a chip-row choice as its human-readable label", async () => {
+    const suggestion: CeoSuggestion = {
+      id: "sug-echo-chip",
+      phase: "blueprint",
+      kind: "ceo_chip_row",
+      payload: {
+        field: "blueprint_id",
+        label: "Pick a template",
+        options: [{ id: "niche-crm", label: "Niche CRM" }],
+      },
+    };
+    render(<CeoCardSection />, { wrapper: makeWrapper(suggestion) });
+
+    fireEvent.click(screen.getByText("Niche CRM"));
+
+    await waitFor(() =>
+      expect(postMessageMock).toHaveBeenCalledWith("Niche CRM", "ceo__human"),
+    );
+  });
+
+  it("does NOT echo bridge_choice into the CEO DM", async () => {
+    const suggestion: CeoSuggestion = {
+      id: "sug-echo-bridge",
+      phase: "bridge",
+      kind: "ceo_chip_row",
+      payload: {
+        field: "bridge_choice",
+        label: "What next?",
+        options: [{ id: "look_around", label: "Look around first" }],
+      },
+    };
+    render(<CeoCardSection />, { wrapper: makeWrapper(suggestion) });
+
+    fireEvent.click(screen.getByText("Look around first"));
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith("/onboarding/transition", {
+        phase: "complete",
+      }),
+    );
+    expect(postMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("survives an echo postMessage failure without blocking the wizard", async () => {
+    postMessageMock.mockRejectedValueOnce(new Error("network down"));
+    const suggestion: CeoSuggestion = {
+      id: "sug-echo-fail",
+      phase: "greet",
+      kind: "ceo_form_field",
+      payload: { field: "company_name", label: "Office name?" },
+    };
+    render(<CeoCardSection />, { wrapper: makeWrapper(suggestion) });
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "Acme" },
+    });
+    fireEvent.click(screen.getByText("Submit"));
+
+    // The transition still fires even though the echo POST failed.
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith("/onboarding/transition", {
+        phase: "identity",
+      }),
+    );
+  });
+
+  // Regression guard for CodeRabbit on PR #988: the echo must be detached
+  // from the submit critical path. If postMessage hangs indefinitely the
+  // wizard must still advance — onboarding state is already committed via
+  // /onboarding/answer; the echo is best-effort UI sugar.
+  it("does not block wizard advance when echo postMessage hangs", async () => {
+    // Never resolves — simulates a hung /messages call.
+    postMessageMock.mockImplementationOnce(() => new Promise(() => {}));
+    const suggestion: CeoSuggestion = {
+      id: "sug-echo-hang",
+      phase: "greet",
+      kind: "ceo_form_field",
+      payload: { field: "company_name", label: "Office name?" },
+    };
+    render(<CeoCardSection />, { wrapper: makeWrapper(suggestion) });
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "Acme" },
+    });
+    fireEvent.click(screen.getByText("Submit"));
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith("/onboarding/transition", {
+        phase: "identity",
+      }),
+    );
   });
 });
 

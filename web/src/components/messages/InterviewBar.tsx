@@ -10,6 +10,7 @@ import {
   type InterviewOption,
   patchSkill,
   post,
+  postMessage,
   type Skill,
   type SkillSimilarRef,
 } from "../../api/client";
@@ -19,8 +20,9 @@ import {
   requestOptionNeedsText,
   requestOptionTextHint,
 } from "../../lib/requestOptions";
-import { useAppStore } from "../../stores/app";
+import { directChannelSlug, useAppStore } from "../../stores/app";
 import { SkillCompareView } from "../apps/SkillCompareView";
+import { humanEchoForCeoAnswer } from "../onboarding/humanEcho";
 import { useOnboardingDMContext } from "../onboarding/OnboardingDMRoute";
 import type { CardStage, CeoSuggestion } from "../onboarding/types";
 import { SidePanel } from "../ui/SidePanel";
@@ -709,6 +711,28 @@ export function CeoCardSection() {
     try {
       if (shouldPersistOnboardingAnswer(field)) {
         await post("/onboarding/answer", { field, value });
+      }
+      // Mirror the human's committed answer into the CEO DM as a chat
+      // bubble. The /messages endpoint persists it the same as any typed
+      // message so a tab reload still shows the transcript. See #978.
+      const echo = humanEchoForCeoAnswer(pendingSuggestion, field, value);
+      if (echo !== null) {
+        // Detached: don't await the echo work. The echo is best-effort UI
+        // sugar (mirror the human's answer back in chat); awaiting it
+        // would let a slow/hung /messages call freeze the wizard in
+        // "submitting" even though /onboarding/answer has already
+        // committed the real state. CodeRabbit on PR #988.
+        void postMessage(echo, directChannelSlug("ceo"))
+          .then(() =>
+            queryClient.invalidateQueries({
+              queryKey: ["messages", directChannelSlug("ceo")],
+            }),
+          )
+          .catch((echoErr: unknown) => {
+            // The next CEO message will still arrive; the user just loses
+            // the visible mirror of their own answer for that turn.
+            console.warn("onboarding: failed to echo human answer", echoErr);
+          });
       }
       await advanceOnboardingAfterAnswer(field, value, phase);
       // Refresh onboarding state so the next suggestion appears.
