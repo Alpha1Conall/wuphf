@@ -36,6 +36,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeDecisionPacketStore is the test double for decisionPacketStore.
@@ -723,6 +724,43 @@ func TestDecisionApproveFromDraftingTransitionsToRunning(t *testing.T) {
 	wikiPath := filepath.Join(dir, "wiki-repo", wikiPromotionPath(taskID))
 	if _, err := os.Stat(wikiPath); err == nil {
 		t.Errorf("wiki article should NOT exist for drafting->running transition, found %s", wikiPath)
+	}
+}
+
+// TestDecisionApproveFromDraftingEmitsWakeAction pins the D1 fix: approving
+// a Drafting issue must emit a task_updated office action so the
+// notifyTaskActionsLoop wakes the owner and work actually starts. Before the
+// fix, the transition only posted a From=system lifecycle card (which
+// notifyAgentsLoop drops) and no action, so the owner sat idle until the
+// human sent a second message. The action's RelatedID must carry the task ID
+// so taskForAction can resolve the owner.
+func TestDecisionApproveFromDraftingEmitsWakeAction(t *testing.T) {
+	t.Setenv("WUPHF_RUNTIME_HOME", t.TempDir())
+	b := newTestBroker(t)
+	taskID := "task-draft-wake"
+	seedTaskInState(t, b, taskID, LifecycleStateDrafting)
+
+	actions, unsubscribe := b.SubscribeActions(16)
+	defer unsubscribe()
+
+	if err := b.RecordTaskDecision(taskID, string(RecordDecisionApprove), "test-human"); err != nil {
+		t.Fatalf("RecordTaskDecision: %v", err)
+	}
+
+	// Drain the buffered action channel with a short deadline; the emit
+	// happens synchronously inside RecordTaskDecision's locked section, so a
+	// generous timeout only matters if the fix regresses (then we fail).
+	deadline := time.After(2 * time.Second)
+	var sawWake bool
+	for !sawWake {
+		select {
+		case action := <-actions:
+			if action.Kind == "task_updated" && action.RelatedID == taskID {
+				sawWake = true
+			}
+		case <-deadline:
+			t.Fatalf("no task_updated wake action emitted for %q on drafting->running approve", taskID)
+		}
 	}
 }
 

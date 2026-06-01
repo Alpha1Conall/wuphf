@@ -1197,7 +1197,7 @@ func TestBuildPromptIncludesMarkdownNotebookPromotionGuidance(t *testing.T) {
 			"notebook_visual_artifact_create",
 			"notebook_promote",
 			"wuphf_wiki_lookup",
-			"create a self-contained HTML companion",
+			"self-contained HTML article",
 			"visual-artifact:ra_...",
 			"Do not bypass notebook_promote",
 		} {
@@ -2687,12 +2687,12 @@ func TestBuildPromptToolHygieneSection(t *testing.T) {
 			t.Errorf("%s prompt missing TOOL HYGIENE section", slug)
 		}
 		if !strings.Contains(prompt, "registered for this session") {
-			t.Errorf("%s prompt missing tool-registration line", slug)
+			t.Errorf("%s prompt missing 'registered for this session' line", slug)
 		}
 		if !strings.Contains(prompt, "Do not read unrelated files") {
 			t.Errorf("%s prompt missing unrelated-files guidance", slug)
 		}
-		if !strings.Contains(prompt, "Emit at most one team_broadcast per turn") {
+		if !strings.Contains(prompt, "AT MOST one team_broadcast per turn") {
 			t.Errorf("%s prompt missing broadcast throttle guidance", slug)
 		}
 	}

@@ -92,16 +92,57 @@ func TestMarkdownKnowledgeMemoryBlock_RequiresPromotionDiscipline(t *testing.T) 
 func TestMarkdownKnowledgeToolBlock_NudgesNaturalHTMLArtifactCreation(t *testing.T) {
 	block := markdownKnowledgeToolBlock()
 	for _, want := range []string{
-		"After notebook_write",
 		"complex specs",
 		"PR reviews",
 		"interactive tuning surfaces",
-		"self-contained HTML companion",
+		"self-contained HTML article",
 		"no network fetches",
 		"visual-artifact:ra_...",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("markdownKnowledgeToolBlock missing HTML artifact trigger %q", want)
+		}
+	}
+}
+
+func TestMarkdownKnowledgeToolBlock_HTMLArticleIsSingleTool(t *testing.T) {
+	// Finding 2: markdownKnowledgeToolBlock used to instruct the deprecated
+	// "after notebook_write, create an HTML companion" pattern, which
+	// contradicted the visualArtifactForcingBlock single-tool flow (HTML
+	// article = one notebook_visual_artifact_create call with empty
+	// source_path, no companion notebook_write). The two blocks must tell one
+	// consistent story.
+	block := markdownKnowledgeToolBlock()
+	// The deprecated companion-after-notebook_write framing must be gone.
+	if strings.Contains(block, "After notebook_write") {
+		t.Errorf("markdownKnowledgeToolBlock still chains the HTML artifact AFTER notebook_write (deprecated companion pattern)")
+	}
+	if strings.Contains(block, "HTML companion") {
+		t.Errorf("markdownKnowledgeToolBlock still describes the HTML artifact as a companion to notebook_write")
+	}
+	// The single-tool flow must be stated: empty source_path, no companion
+	// notebook_write for the same content.
+	for _, want := range []string{
+		"leave source_path empty",
+		"do NOT also call notebook_write for the same content",
+		"HTML article IS the deliverable",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("markdownKnowledgeToolBlock missing single-tool HTML flow phrase %q", want)
+		}
+	}
+}
+
+func TestMarkdownKnowledgeToolBlock_KeepsPlainNoteGuidance(t *testing.T) {
+	// Reconciling the HTML path must not delete legitimate notebook_write
+	// guidance for plain markdown notes.
+	block := markdownKnowledgeToolBlock()
+	for _, want := range []string{
+		"notebook_write: Save your own working notes",
+		"default write path for plain agent-authored markdown notes",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("markdownKnowledgeToolBlock dropped plain-note notebook_write guidance %q", want)
 		}
 	}
 }
@@ -282,7 +323,6 @@ func TestPromptBuilder_MarkdownMemoryPromptsNaturalHTMLArtifactsDuringWork(t *te
 		got := pb.Build(slug)
 		for _, want := range []string{
 			"notebook_visual_artifact_create",
-			"After notebook_write",
 			"complex specs",
 			"implementation plans",
 			"comparison grids",
@@ -298,13 +338,14 @@ func TestPromptBuilder_MarkdownMemoryPromptsNaturalHTMLArtifactsDuringWork(t *te
 	}
 }
 
-func TestPromptBuilder_VisualArtifactForcingRulePresentOnEverySurface(t *testing.T) {
-	// The notebook_visual_artifact_create tool was unused in practice because
-	// the old prompt softly suggested it. This test pins the MUST-trigger
-	// rule into every surface that markdown memory reaches: lead office,
-	// specialist office, and 1:1. If any of these regresses to "may",
-	// agents stop producing artifacts and the chat/wiki visual surface goes
-	// empty again.
+func TestPromptBuilder_VisualArtifactSelectivityRulePresentOnEverySurface(t *testing.T) {
+	// The OLD version of this prompt block FORCED an HTML article for every
+	// research/explain/plan request. The 2026-05-29 demo showed that was a
+	// bug: a one-line coffee-pressure question got a full HTML article plus
+	// an unsolicited team_skill_create. The block is now a selectivity
+	// decision tree — agents must judge whether HTML is warranted before
+	// reaching for the tool. This test pins the new shape across every
+	// surface that markdown memory reaches.
 	mkBuilder := func(oneOnOne bool) *promptBuilder {
 		return &promptBuilder{
 			isOneOnOne:  func() bool { return oneOnOne },
@@ -334,35 +375,52 @@ func TestPromptBuilder_VisualArtifactForcingRulePresentOnEverySurface(t *testing
 		{name: "lead/one-on-one", oneOnOne: true, slug: "ceo"},
 	}
 	wants := []string{
+		// Selectivity framing — header explicitly says "selectivity, not reflex".
 		"HTML ARTICLE RULE",
-		// HTML article is the primary format; markdown stays for skills/notes.
-		"the article is a single self-contained HTML document",
-		"Skill.md files, short working notes",
-		"visual-artifact:ra_...",
-		"wiki article, draft, page",
-		"plan, spec, RFC",
-		// Topic/concept triggers — without these, "research X" or
-		// "explain how X works" reads as conversational and the agent
-		// falls back to plain markdown.
-		"research, explain, teach, summarize, break down, walk through, or unpack",
-		"how does X actually work",
-		"comparison, decision matrix",
-		"diagram, flow, sequence",
-		"more than ~200 words",
-		"technical-manual style",
-		// Atomic-turn rule — gist text first, then article, then link card.
-		// All three tool calls in ONE assistant response, no narration
-		// between them. The agent split this across 3 separate responses
-		// in the live demo and ended its turn after step 1 each time.
-		"ATOMIC-TURN RULE",
+		"selectivity, not reflex",
+		"It is NOT the default answer format",
+		"answer in plain text in the channel and STOP",
+		// Positive trigger: all three conditions must be true.
+		"USE an HTML article ONLY when ALL THREE",
+		"comparing two-or-more things side by side",
+		"walking a multi-step process or timeline",
+		"mapping a 2D variable space",
+		"multi-section explainer with at least THREE distinct sections",
+		"Plain prose in chat would lose meaningful information density",
+		// Negative trigger: the decision tree's "DO NOT" branch.
+		"DO NOT use an HTML article when",
+		"conversational, a status update, a short factual reply",
+		"one-liner question expecting a one-liner answer",
+		"mostly a list, a code snippet, a small table",
+		"urge to \"codify\" or \"document\"",
+		"Do not announce that you decided against an artifact",
+		// When HTML IS warranted: it must be a real artifact with real figures.
+		"WHEN HTML IS WARRANTED",
+		"pure-text \"article\" with no figures is NOT an artifact",
+		"genuine SVG figures",
+		"#1342FF",
+		"FIG_NNN labels",
+		"monospace captions",
+		// Atomic-turn rule still applies WHEN the rule fires.
+		"ATOMIC-TURN RULE (only when HTML IS warranted)",
 		"SAME assistant response",
-		"Do NOT narrate the process",
+		"Do NOT narrate the process between steps",
 		"notebook_visual_artifact_create",
-		"clickable card linking to the full-screen viewer",
-		// Pin the explicit anti-patterns so the rule keeps protecting
-		// against them if someone later rewords the block.
-		"Step 1 — quick gist first.",
-		"Step 2 — full HTML article.",
+		"visual-artifact:ra_...",
+		"full breakdown below.",
+		// Broadcast budget — at most 2 for artifact turns, at most 1 otherwise.
+		"BROADCAST BUDGET PER TURN",
+		"Artifact turns: AT MOST two chat messages",
+		"Non-artifact turns: AT MOST one chat message",
+		"No plan preamble",
+		// Unsolicited-tools ban — the hard ban on skill/task/wiki creation.
+		"DO NOT CALL these tools without an explicit human request",
+		"team_skill_create",
+		"make this a skill",
+		"team_task create / complete",
+		"team_wiki_write",
+		"save to wiki",
+		"self-codify the pattern",
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,6 +431,152 @@ func TestPromptBuilder_VisualArtifactForcingRulePresentOnEverySurface(t *testing
 				}
 			}
 		})
+	}
+}
+
+func TestPromptBuilder_HTMLArtifactFlowIsConsistentAcrossBlocks(t *testing.T) {
+	// Finding 2: the full prompt must NOT simultaneously instruct the
+	// deprecated "notebook_write then HTML companion" pattern (from
+	// markdownKnowledgeToolBlock) and the single-tool "HTML article with
+	// empty source_path, no companion notebook_write" pattern (from
+	// visualArtifactForcingBlock). The two blocks must tell one story.
+	mkBuilder := func(oneOnOne bool) *promptBuilder {
+		return &promptBuilder{
+			isOneOnOne:  func() bool { return oneOnOne },
+			isFocusMode: func() bool { return false },
+			packName:    func() string { return "WUPHF Office" },
+			leadSlug:    func() string { return "ceo" },
+			members: func() []officeMember {
+				return []officeMember{
+					{Slug: "ceo", Name: "CEO", Role: "ceo"},
+					{Slug: "pm", Name: "Product Manager"},
+				}
+			},
+			policies:       func() []officePolicy { return nil },
+			nameFor:        func(slug string) string { return slug },
+			markdownMemory: true,
+			nexDisabled:    true,
+		}
+	}
+	cases := []struct {
+		name     string
+		oneOnOne bool
+		slug     string
+	}{
+		{name: "lead/office", oneOnOne: false, slug: "ceo"},
+		{name: "specialist/office", oneOnOne: false, slug: "pm"},
+		{name: "lead/one-on-one", oneOnOne: true, slug: "ceo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mkBuilder(tc.oneOnOne).Build(tc.slug)
+			// The single-tool flow is the canonical instruction and must be
+			// present.
+			if !strings.Contains(got, "Leave source_path empty; the HTML is the article, not a companion to a markdown file.") {
+				t.Fatalf("%s prompt missing single-tool HTML flow (empty source_path)", tc.name)
+			}
+			if !strings.Contains(got, "Do NOT also call notebook_write for the same content.") {
+				t.Fatalf("%s prompt missing the no-companion-notebook_write rule", tc.name)
+			}
+			// The deprecated companion-after-notebook_write instruction must be
+			// gone everywhere — no block may still chain the HTML artifact
+			// AFTER a notebook_write of the same content.
+			if strings.Contains(got, "After notebook_write, create a self-contained HTML companion") {
+				t.Fatalf("%s prompt still carries the deprecated notebook_write-then-companion instruction", tc.name)
+			}
+			if strings.Contains(got, "create an HTML visual companion with notebook_visual_artifact_create") {
+				t.Fatalf("%s prompt still describes the HTML artifact as a companion to notebook_write", tc.name)
+			}
+		})
+	}
+}
+
+func TestPromptBuilder_ToolSearchAcceptanceLanguagePreserved(t *testing.T) {
+	// Existing behavior we don't want to lose: when claude-code defers tool
+	// schemas, the agent should make ONE ToolSearch call at the start of the
+	// turn (silently, no narration) and proceed. The schema list it loads is
+	// now pared back — it must NOT preload the genuinely-unsolicited tools
+	// (skill_create, wiki_write) unless the human explicitly asked. team_task
+	// is NO LONGER in the ban: Rule Zero requires team_task action=create as
+	// the FIRST tool call on a work-shaped request, so banning its schema
+	// would forbid loading a tool the agent is mandated to use.
+	pb := &promptBuilder{
+		isOneOnOne:  func() bool { return false },
+		isFocusMode: func() bool { return false },
+		packName:    func() string { return "WUPHF Office" },
+		leadSlug:    func() string { return "ceo" },
+		members: func() []officeMember {
+			return []officeMember{
+				{Slug: "ceo", Name: "CEO"},
+				{Slug: "pm", Name: "Product Manager"},
+			}
+		},
+		policies: func() []officePolicy { return nil },
+		nameFor:  func(slug string) string { return slug },
+	}
+	for _, slug := range []string{"ceo", "pm"} {
+		got := pb.Build(slug)
+		for _, want := range []string{
+			"claude-code defers their schemas behind a built-in ToolSearch tool",
+			"do it ONCE at the very start of your turn",
+			"single ToolSearch call",
+			"Load ONLY the schemas you actually plan to use",
+			"Do NOT preload team_skill_create or team_wiki_write",
+			"Never call ToolSearch a second time in the same turn",
+			"Do NOT narrate the tool-loading process",
+		} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s prompt missing ToolSearch language %q", slug, want)
+			}
+		}
+		// The preload ban must NOT swallow team_task — Rule Zero mandates it.
+		// The old blanket ban listed all three tools together; assert that
+		// exact contradiction is gone and the Rule-Zero carve-out is present.
+		if strings.Contains(got, "Do NOT preload team_skill_create, team_task, or team_wiki_write") {
+			t.Fatalf("%s prompt still bans preloading team_task — contradicts Rule Zero", slug)
+		}
+		if !strings.Contains(got, "team_task is exempt — Rule Zero requires team_task action=create") {
+			t.Fatalf("%s prompt missing Rule-Zero exemption carve-out for team_task", slug)
+		}
+	}
+}
+
+func TestPromptBuilder_UnsolicitedToolBanIsExplicit(t *testing.T) {
+	// Live demo failure 2026-05-29: after answering a coffee question, the
+	// agent called team_skill_create to codify "research-html-article" and
+	// team_task to mark a task complete. Neither was requested. Pin an
+	// explicit ban so these tools are not called for self-codification.
+	pb := &promptBuilder{
+		isOneOnOne:  func() bool { return false },
+		isFocusMode: func() bool { return false },
+		packName:    func() string { return "WUPHF Office" },
+		leadSlug:    func() string { return "ceo" },
+		members: func() []officeMember {
+			return []officeMember{
+				{Slug: "ceo", Name: "CEO"},
+				{Slug: "pm", Name: "Product Manager"},
+			}
+		},
+		policies:       func() []officePolicy { return nil },
+		nameFor:        func(slug string) string { return slug },
+		markdownMemory: true,
+		nexDisabled:    true,
+	}
+	for _, slug := range []string{"ceo", "pm"} {
+		got := pb.Build(slug)
+		// Ban must apply to all three tool families.
+		for _, want := range []string{
+			"team_skill_create — ONLY when the human literally says",
+			"Answering a question well is NOT permission to codify",
+			"team_task create / complete — ONLY when the human assigned a task",
+			"Do not invent a task to mark complete after a chat answer",
+			"team_wiki_write — ONLY when the human says",
+			"self-codify the pattern",
+		} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s prompt missing unsolicited-tool ban %q", slug, want)
+			}
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import type { Message } from "../../api/client";
 import { toggleReaction } from "../../api/client";
 import { useDefaultHarness } from "../../hooks/useConfig";
 import { useOfficeMembers } from "../../hooks/useMembers";
+import { useMessages } from "../../hooks/useMessages";
 import { formatTime } from "../../lib/format";
 import { resolveHarness } from "../../lib/harness";
 import { renderMentions } from "../../lib/mentions";
@@ -22,6 +23,10 @@ import { HarnessBadge } from "../ui/HarnessBadge";
 import { PixelAvatar } from "../ui/PixelAvatar";
 import { RedactedBadge } from "../ui/RedactedBadge";
 import { showNotice } from "../ui/Toast";
+import {
+  ArtifactSkeleton,
+  useArtifactSkeletonTrigger,
+} from "./ArtifactSkeleton";
 import {
   IssueCreatedCard,
   parseIssueCreatedPayload,
@@ -137,6 +142,26 @@ export function MessageBubble({
     () => (isHuman ? renderMentions(renderedText, knownSlugs) : null),
     [isHuman, renderedText, knownSlugs],
   );
+
+  // Skeletal loader between "gist" message and the eventual visual-artifact
+  // card. Only candidates: agent-authored top-level messages (not replies,
+  // not humans). We subscribe to the channel feed + a coarse ticker so the
+  // skeleton ages out (60s window) without waiting for the next refetch.
+  const skeletonCandidate = !(
+    isHuman ||
+    isReply ||
+    message.content?.startsWith("[STATUS]")
+  );
+  // Always call hooks (rules of hooks). When the candidate is not eligible,
+  // `useArtifactSkeletonTrigger` short-circuits to `false` and skips its own
+  // ticker, so this is also cheap.
+  const { data: channelMessages = [] } = useMessages(currentChannel);
+  const showArtifactSkeleton = useArtifactSkeletonTrigger({
+    enabled: skeletonCandidate,
+    message,
+    channelMessages,
+    members,
+  });
 
   // Status messages — compact
   if (message.content?.startsWith("[STATUS]")) {
@@ -281,8 +306,16 @@ export function MessageBubble({
           humanRendered={humanRendered}
         />
 
+        {/* Rich-artifact reference card, or the drafting skeleton while the
+            real card is still being produced. Rendered INSIDE .message-content
+            (not as a sibling of .message) so the skeleton aligns horizontally
+            with the eventual MessageArtifactReferences card instead of jumping
+            in from the feed edge when the real artifact lands. The skeleton
+            only shows when there's no real artifact reference yet. */}
         {richArtifactIds.length > 0 ? (
           <MessageArtifactReferences artifactIds={richArtifactIds} />
+        ) : showArtifactSkeleton ? (
+          <ArtifactSkeleton />
         ) : null}
 
         {/* Reactions */}
@@ -335,90 +368,12 @@ export function MessageBubble({
         )}
       </div>
 
-      {/* Hover actions — reply in thread, quote, copy link. Absolutely
-          positioned so they don't change the bubble's flow layout. */}
-      {onOpenThread || onQuoteReply || onCopyLink ? (
-        <div
-          className="message-hover-actions"
-          role="toolbar"
-          aria-label="Message actions"
-        >
-          {onOpenThread ? (
-            <button
-              type="button"
-              className="message-hover-btn"
-              onClick={() => onOpenThread(message.id)}
-              title="Reply in thread"
-              aria-label="Reply in thread"
-            >
-              <svg
-                aria-hidden="true"
-                focusable="false"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
-            </button>
-          ) : null}
-          {onQuoteReply ? (
-            <button
-              type="button"
-              className="message-hover-btn"
-              onClick={() => onQuoteReply(message)}
-              title="Quote-reply"
-              aria-label="Quote-reply"
-            >
-              <svg
-                aria-hidden="true"
-                focusable="false"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M3 21v-5a5 5 0 0 1 5-5h13" />
-                <path d="m16 16-5-5 5-5" />
-              </svg>
-            </button>
-          ) : null}
-          {onCopyLink ? (
-            <button
-              type="button"
-              className="message-hover-btn"
-              onClick={() => onCopyLink(message.id)}
-              title="Copy link"
-              aria-label="Copy link"
-            >
-              <svg
-                aria-hidden="true"
-                focusable="false"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.72-1.71" />
-              </svg>
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+      <MessageHoverActions
+        message={message}
+        onOpenThread={onOpenThread}
+        onQuoteReply={onQuoteReply}
+        onCopyLink={onCopyLink}
+      />
     </div>
   );
 }
@@ -443,6 +398,107 @@ function MessageBodyText({
       >
         {renderedText}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+/**
+ * Hover toolbar (reply-in-thread / quote / copy-link). Absolutely positioned
+ * so it doesn't shift the bubble layout. Extracted from MessageBubble so the
+ * parent component stays under the function-length lint budget.
+ */
+function MessageHoverActions({
+  message,
+  onOpenThread,
+  onQuoteReply,
+  onCopyLink,
+}: {
+  message: Message;
+  onOpenThread?: (id: string) => void;
+  onQuoteReply?: (message: Message) => void;
+  onCopyLink?: (id: string) => void;
+}) {
+  if (!(onOpenThread || onQuoteReply || onCopyLink)) return null;
+  return (
+    <div
+      className="message-hover-actions"
+      role="toolbar"
+      aria-label="Message actions"
+    >
+      {onOpenThread ? (
+        <button
+          type="button"
+          className="message-hover-btn"
+          onClick={() => onOpenThread(message.id)}
+          title="Reply in thread"
+          aria-label="Reply in thread"
+        >
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+        </button>
+      ) : null}
+      {onQuoteReply ? (
+        <button
+          type="button"
+          className="message-hover-btn"
+          onClick={() => onQuoteReply(message)}
+          title="Quote-reply"
+          aria-label="Quote-reply"
+        >
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M3 21v-5a5 5 0 0 1 5-5h13" />
+            <path d="m16 16-5-5 5-5" />
+          </svg>
+        </button>
+      ) : null}
+      {onCopyLink ? (
+        <button
+          type="button"
+          className="message-hover-btn"
+          onClick={() => onCopyLink(message.id)}
+          title="Copy link"
+          aria-label="Copy link"
+        >
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.72-1.71" />
+          </svg>
+        </button>
+      ) : null}
     </div>
   );
 }

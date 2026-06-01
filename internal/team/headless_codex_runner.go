@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nex-crm/wuphf/internal/config"
@@ -147,7 +148,39 @@ func (l *Launcher) runHeadlessCodexTurn(ctx context.Context, slug string, notifi
 		FirstTextMs:  -1,
 		FirstToolMs:  -1,
 	}
-	l.updateHeadlessProgress(slug, "active", "thinking", "reviewing work packet", metrics)
+	// metricsMu guards every read and write of metrics. The heartbeat tick
+	// closure below runs on its own goroutine and reads the whole struct (via
+	// updateHeadlessProgress) while the stream callback mutates FirstEventMs /
+	// FirstTextMs / FirstToolMs and the post-Wait paths write TotalMs — a real
+	// -race data race without this lock. Helpers snapshot a copy under the lock
+	// so callers never pass the live struct to a concurrent reader.
+	var metricsMu sync.Mutex
+	snapshotMetrics := func() headlessProgressMetrics {
+		metricsMu.Lock()
+		defer metricsMu.Unlock()
+		return metrics
+	}
+	setMetric := func(mutate func(m *headlessProgressMetrics)) {
+		metricsMu.Lock()
+		mutate(&metrics)
+		metricsMu.Unlock()
+	}
+	l.updateHeadlessProgress(slug, "active", "thinking", "reviewing work packet", snapshotMetrics())
+
+	// Coarse "still working (NNs)" heartbeat. A codex exec turn runs
+	// ~80-120s; if the model is mid-reasoning and the parser sees no
+	// item.* events for a stretch, the UI would otherwise freeze on a
+	// stale badge. The heartbeat ticks a low-noise progress update every
+	// codexHeartbeatInterval so the user always sees the turn is alive.
+	// Real item events call heartbeat.Note() to reset the timer, so the
+	// heartbeat only fires during genuine silence — it never competes with
+	// fine-grained "running <tool>" / "drafting response" detail.
+	heartbeat := newCodexProgressHeartbeat(func(elapsed time.Duration) {
+		l.updateHeadlessProgress(slug, "active", "thinking",
+			fmt.Sprintf("still working (%ds)", int(elapsed.Seconds())), snapshotMetrics())
+	})
+	heartbeat.Start(startedAt)
+	defer heartbeat.Stop()
 
 	// Live-chat relay surfaces the model's user-facing text to the channel
 	// at sentence/paragraph boundaries while the turn is still running.
@@ -175,19 +208,28 @@ func (l *Launcher) runHeadlessCodexTurn(ctx context.Context, slug string, notifi
 	var turnToolNames []string
 	var turnTextLen int
 	result, parseErr := provider.ReadCodexJSONStream(teedStdout, func(event provider.CodexStreamEvent) {
+		// Any parseable codex event resets the silence timer: while items
+		// are flowing the fine-grained per-event detail below is the user's
+		// progress signal, not the coarse heartbeat.
+		heartbeat.Note()
 		if firstEventAt.IsZero() {
 			firstEventAt = time.Now()
-			metrics.FirstEventMs = durationMillis(startedAt, firstEventAt)
+			setMetric(func(m *headlessProgressMetrics) { m.FirstEventMs = durationMillis(startedAt, firstEventAt) })
 		}
 		switch event.Type {
+		case "reasoning":
+			// Codex emits reasoning/thinking items between tool calls; map
+			// them to the same "planning next step" surface the Claude
+			// runner uses so a long reasoning stretch is not a dark interval.
+			l.updateHeadlessProgress(slug, "active", "thinking", "planning next step", snapshotMetrics())
 		case "text":
 			if firstTextAt.IsZero() && strings.TrimSpace(event.Text) != "" {
 				firstTextAt = time.Now()
-				metrics.FirstTextMs = durationMillis(startedAt, firstTextAt)
+				setMetric(func(m *headlessProgressMetrics) { m.FirstTextMs = durationMillis(startedAt, firstTextAt) })
 			}
 			if !textStarted && strings.TrimSpace(event.Text) != "" {
 				textStarted = true
-				l.updateHeadlessProgress(slug, "active", "text", "drafting response", metrics)
+				l.updateHeadlessProgress(slug, "active", "text", "drafting response", snapshotMetrics())
 			}
 			relay.OnText(event.Text)
 			turnTextLen += len(event.Text)
@@ -196,39 +238,41 @@ func (l *Launcher) runHeadlessCodexTurn(ctx context.Context, slug string, notifi
 			relay.Flush()
 			if firstToolAt.IsZero() {
 				firstToolAt = time.Now()
-				metrics.FirstToolMs = durationMillis(startedAt, firstToolAt)
+				setMetric(func(m *headlessProgressMetrics) { m.FirstToolMs = durationMillis(startedAt, firstToolAt) })
 			}
 			line := fmt.Sprintf("tool_use: %s %s", event.ToolName, truncate(event.ToolInput, 120))
 			appendHeadlessCodexLog(slug, line)
-			l.updateHeadlessProgress(slug, "active", "tool_use", fmt.Sprintf("running %s", strings.TrimSpace(event.ToolName)), metrics)
+			heartbeat.Note() // suppress the coarse heartbeat: a real tool event just landed.
+			l.updateHeadlessProgress(slug, "active", "tool_use", codexToolProgressDetail(event.ToolName), snapshotMetrics())
 			turnToolNames = append(turnToolNames, event.ToolName)
 			emitHeadlessToolUse(agentStream, turnID, HeadlessProviderCodex, slug, taskID, event.ToolName, event.ToolInput, event.RawType)
 		case "tool_result":
 			line := "tool_result: " + truncate(event.Text, 140)
 			appendHeadlessCodexLog(slug, line)
-			l.updateHeadlessProgress(slug, "active", "tool_result", truncate(event.Text, 140), metrics)
+			l.updateHeadlessProgress(slug, "active", "tool_result", truncate(event.Text, 140), snapshotMetrics())
 			emitHeadlessToolResult(agentStream, turnID, HeadlessProviderCodex, slug, taskID, event.ToolName, event.Text, event.RawType)
 		case "error":
 			appendHeadlessCodexLog(slug, "stream_error: "+event.Detail)
-			l.updateHeadlessProgress(slug, "error", "error", truncate(event.Detail, 180), metrics)
+			l.updateHeadlessProgress(slug, "error", "error", truncate(event.Detail, 180), snapshotMetrics())
 		}
 	})
 	_ = pw.Close() // signal scanner goroutine that stream is done (io.PipeWriter.Close always returns nil)
 	if err := cmd.Wait(); err != nil {
 		detail := firstNonEmpty(result.LastError, strings.TrimSpace(stderr.String()))
-		metrics.TotalMs = time.Since(startedAt).Milliseconds()
+		setMetric(func(m *headlessProgressMetrics) { m.TotalMs = time.Since(startedAt).Milliseconds() })
+		metricsSnap := snapshotMetrics()
 		if detail != "" {
 			appendHeadlessCodexLatency(slug, fmt.Sprintf("status=error total_ms=%d first_event_ms=%d first_text_ms=%d first_tool_ms=%d detail=%q",
-				metrics.TotalMs,
+				metricsSnap.TotalMs,
 				durationMillis(startedAt, firstEventAt),
 				durationMillis(startedAt, firstTextAt),
 				durationMillis(startedAt, firstToolAt),
 				detail,
 			))
 			appendHeadlessCodexLog(slug, "stderr: "+detail)
-			l.updateHeadlessProgress(slug, "error", "error", truncate(detail, 180), metrics)
-			emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", detail, metrics, codexUsageToTokenUsage(result.Usage))
-			emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, detail, turnToolNames, turnTextLen, metrics, codexUsageToTokenUsage(result.Usage))
+			l.updateHeadlessProgress(slug, "error", "error", truncate(detail, 180), metricsSnap)
+			emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", detail, metricsSnap, codexUsageToTokenUsage(result.Usage))
+			emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, detail, turnToolNames, turnTextLen, metricsSnap, codexUsageToTokenUsage(result.Usage))
 			if isCodexAuthError(detail) && l.broker != nil {
 				sysTarget := target
 				if strings.TrimSpace(sysTarget) == "" {
@@ -242,40 +286,49 @@ func (l *Launcher) runHeadlessCodexTurn(ctx context.Context, slug string, notifi
 			return fmt.Errorf("%w: %s", err, detail)
 		}
 		appendHeadlessCodexLatency(slug, fmt.Sprintf("status=error total_ms=%d first_event_ms=%d first_text_ms=%d first_tool_ms=%d detail=%q",
-			metrics.TotalMs,
+			metricsSnap.TotalMs,
 			durationMillis(startedAt, firstEventAt),
 			durationMillis(startedAt, firstTextAt),
 			durationMillis(startedAt, firstToolAt),
 			err.Error(),
 		))
-		emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", err.Error(), metrics, codexUsageToTokenUsage(result.Usage))
-		emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, err.Error(), turnToolNames, turnTextLen, metrics, codexUsageToTokenUsage(result.Usage))
+		emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", err.Error(), metricsSnap, codexUsageToTokenUsage(result.Usage))
+		emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, err.Error(), turnToolNames, turnTextLen, metricsSnap, codexUsageToTokenUsage(result.Usage))
 		return err
 	}
 	if parseErr != nil {
-		metrics.TotalMs = time.Since(startedAt).Milliseconds()
-		l.updateHeadlessProgress(slug, "error", "error", truncate(parseErr.Error(), 180), metrics)
-		emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", parseErr.Error(), metrics, codexUsageToTokenUsage(result.Usage))
-		emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, parseErr.Error(), turnToolNames, turnTextLen, metrics, codexUsageToTokenUsage(result.Usage))
+		setMetric(func(m *headlessProgressMetrics) { m.TotalMs = time.Since(startedAt).Milliseconds() })
+		metricsSnap := snapshotMetrics()
+		l.updateHeadlessProgress(slug, "error", "error", truncate(parseErr.Error(), 180), metricsSnap)
+		emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", parseErr.Error(), metricsSnap, codexUsageToTokenUsage(result.Usage))
+		emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, parseErr.Error(), turnToolNames, turnTextLen, metricsSnap, codexUsageToTokenUsage(result.Usage))
 		return parseErr
 	}
-	metrics.TotalMs = time.Since(startedAt).Milliseconds()
+	setMetric(func(m *headlessProgressMetrics) { m.TotalMs = time.Since(startedAt).Milliseconds() })
+	metricsSnap := snapshotMetrics()
 	appendHeadlessCodexLatency(slug, fmt.Sprintf("status=ok total_ms=%d first_event_ms=%d first_text_ms=%d first_tool_ms=%d final_chars=%d",
-		metrics.TotalMs,
+		metricsSnap.TotalMs,
 		durationMillis(startedAt, firstEventAt),
 		durationMillis(startedAt, firstTextAt),
 		durationMillis(startedAt, firstToolAt),
 		len(strings.TrimSpace(firstNonEmpty(result.FinalMessage, result.LastPlainLine))),
 	))
-	summary := strings.TrimSpace(formatHeadlessLatencySummary(metrics))
+	summary := strings.TrimSpace(formatHeadlessLatencySummary(metricsSnap))
 	if summary == "" {
 		summary = "reply ready"
 	} else {
 		summary = "reply ready · " + summary
 	}
-	l.updateHeadlessProgress(slug, "idle", "idle", summary, metrics)
-	emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, summary, "", metrics, codexUsageToTokenUsage(result.Usage))
-	emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", turnToolNames, turnTextLen, metrics, codexUsageToTokenUsage(result.Usage))
+	// Terminal turn event + manifest can fire now — they carry the turn's
+	// own latency/usage, not the agent's live status. The status flip to
+	// "idle" is deliberately deferred until AFTER the final gist+artifact
+	// post below (see the trailing updateHeadlessProgress). The chat's
+	// "agent is working" / skeleton indicator reads the OfficeMember
+	// status; flipping to idle before the gist message lands would tear
+	// down the skeleton a beat too early and the final message would pop in
+	// against an already-idle agent. Keep status="active" through the post.
+	emitHeadlessTerminalWithTurn(agentStream, turnID, HeadlessProviderCodex, slug, taskID, summary, "", metricsSnap, codexUsageToTokenUsage(result.Usage))
+	emitHeadlessManifest(agentStream, turnID, HeadlessProviderCodex, slug, taskID, "", turnToolNames, turnTextLen, metricsSnap, codexUsageToTokenUsage(result.Usage))
 	if l.broker != nil && (result.Usage.InputTokens != 0 || result.Usage.OutputTokens != 0 || result.Usage.CacheReadTokens != 0 || result.Usage.CacheCreationTokens != 0 || result.Usage.CostUSD != 0) {
 		l.broker.RecordAgentUsage(slug, l.codexModelForAgent(slug), result.Usage)
 	}
@@ -289,6 +342,10 @@ func (l *Launcher) runHeadlessCodexTurn(ctx context.Context, slug string, notifi
 			appendHeadlessCodexLog(slug, fmt.Sprintf("fallback-post: posted final output to #%s as %s", msg.Channel, msg.ID))
 		}
 	}
+	// Flip to idle last: the gist+artifact post above has now landed, so the
+	// frontend's "agent is working" skeleton stays up until the final message
+	// is in the channel, then resolves cleanly to idle.
+	l.updateHeadlessProgress(slug, "idle", "idle", summary, metricsSnap)
 	return nil
 }
 
@@ -792,6 +849,120 @@ func stripEnvKeys(env []string, strip []string) []string {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// codexHeartbeatInterval is how often the coarse "still working (NNs)"
+// progress update fires while the codex turn is silent (no parseable
+// item.* events). A codex exec turn runs ~80-120s; 15s keeps the UI alive
+// without flooding it.
+const codexHeartbeatInterval = 15 * time.Second
+
+// codexHeartbeatIntervalForTest lets tests shrink the heartbeat interval so
+// they don't wait the full production 15s. Production code reads it via
+// newCodexProgressHeartbeat; it defaults to codexHeartbeatInterval and is
+// only overridden in _test.go.
+var codexHeartbeatIntervalForTest = codexHeartbeatInterval
+
+// codexProgressHeartbeat ticks a coarse progress update during stretches
+// where the codex stream produces no parseable events. Every real event
+// calls Note() to reset the timer, so the heartbeat fires only during
+// genuine silence. This is the point-4 fallback: even if a particular
+// codex build emits nothing incremental for a long reasoning stretch, the
+// user still sees the turn is alive rather than a frozen badge.
+type codexProgressHeartbeat struct {
+	tick     func(elapsed time.Duration)
+	interval time.Duration
+	stop     chan struct{}
+	note     chan struct{}
+	stopOnce sync.Once
+}
+
+func newCodexProgressHeartbeat(tick func(elapsed time.Duration)) *codexProgressHeartbeat {
+	return &codexProgressHeartbeat{
+		tick:     tick,
+		interval: codexHeartbeatIntervalForTest,
+		stop:     make(chan struct{}),
+		note:     make(chan struct{}, 1),
+	}
+}
+
+// Start launches the heartbeat goroutine. startedAt anchors the elapsed
+// duration reported to tick so the "(NNs)" reflects total turn time.
+func (h *codexProgressHeartbeat) Start(startedAt time.Time) {
+	if h == nil || h.tick == nil {
+		return
+	}
+	interval := h.interval
+	if interval <= 0 {
+		interval = codexHeartbeatInterval
+	}
+	go func() {
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-h.stop:
+				return
+			case <-h.note:
+				// A real event landed — reset the silence window so the
+				// coarse heartbeat never overwrites fine-grained detail.
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(interval)
+			case <-timer.C:
+				h.tick(time.Since(startedAt))
+				timer.Reset(interval)
+			}
+		}
+	}()
+}
+
+// Note signals that a real event was observed, resetting the silence
+// window. Non-blocking: the buffered channel coalesces bursts of events
+// into a single reset.
+func (h *codexProgressHeartbeat) Note() {
+	if h == nil {
+		return
+	}
+	select {
+	case h.note <- struct{}{}:
+	default:
+	}
+}
+
+// Stop terminates the heartbeat goroutine. Safe to call multiple times
+// (the deferred Stop plus any explicit call).
+func (h *codexProgressHeartbeat) Stop() {
+	if h == nil {
+		return
+	}
+	h.stopOnce.Do(func() { close(h.stop) })
+}
+
+// codexToolProgressDetail builds the human-facing progress detail for a
+// codex tool call. Visual-artifact tools get a "building visual artifact"
+// phrasing so the user knows a figure is being drafted (D4's skeleton
+// hooks off this); everything else reads "running <tool>".
+func codexToolProgressDetail(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		return "running tool"
+	}
+	lower := strings.ToLower(name)
+	switch {
+	case strings.Contains(lower, "visual_artifact"):
+		return "drafting figure · building visual artifact"
+	case strings.Contains(lower, "artifact"):
+		return "building artifact"
+	case strings.Contains(lower, "broadcast"):
+		return "sharing update with the team"
+	default:
+		return fmt.Sprintf("running %s", name)
+	}
 }
 
 // codexModelForAgent returns the codex model the next dispatch should use
