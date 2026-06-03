@@ -15,6 +15,7 @@ import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 import type { PluggableList } from "unified";
 
+import { wikiFileUrl } from "../api/wiki";
 import { CalloutBlockquote } from "../components/wiki/Callout";
 import ImageEmbed from "../components/wiki/ImageEmbed";
 import { calloutRemarkPlugin } from "../components/wiki/parseCallout";
@@ -98,9 +99,61 @@ export function buildRemarkPlugins(
   return [remarkGfm, wikiLinkRemarkPlugin(resolver), calloutRemarkPlugin()];
 }
 
-/** Rehype plugins — slug + autolink headings for TOC anchors. */
+/** Minimal hast node shape — enough to walk + rewrite without @types/hast. */
+interface HastNode {
+  type: string;
+  tagName?: string;
+  value?: string;
+  children?: HastNode[];
+}
+
+/**
+ * Rehype transform: hoist images out of image-only paragraphs.
+ *
+ * Markdown wraps a standalone `![alt](src)` in a `<p>`. Our image renderer
+ * ({@link ImageEmbed}, editorial mode) emits a block-level `<figure>`. A
+ * `<figure>` inside a `<p>` is invalid HTML — the browser auto-closes the `<p>`,
+ * which diverges from React's virtual tree and throws a hydration error on
+ * every article that embeds an image (e.g. a profile page with a portrait).
+ * Unwrapping at the hast layer — replacing such a `<p>` with its image
+ * children — keeps the rendered tree valid. Whitespace-only text siblings are
+ * dropped so `![a](x) ![b](y)` on its own line still unwraps cleanly.
+ */
+function rehypeUnwrapImages() {
+  const isWhitespace = (n: HastNode): boolean =>
+    n.type === "text" && (n.value ?? "").trim() === "";
+  const isImage = (n: HastNode): boolean =>
+    n.type === "element" && n.tagName === "img";
+  const isImageOnlyParagraph = (n: HastNode): boolean => {
+    if (n.type !== "element" || n.tagName !== "p" || !n.children) return false;
+    const meaningful = n.children.filter((c) => !isWhitespace(c));
+    return meaningful.length > 0 && meaningful.every(isImage);
+  };
+  const walk = (node: HastNode): void => {
+    if (!node.children) return;
+    const next: HastNode[] = [];
+    for (const child of node.children) {
+      if (isImageOnlyParagraph(child)) {
+        for (const inner of child.children ?? []) {
+          if (!isWhitespace(inner)) next.push(inner);
+        }
+      } else {
+        next.push(child);
+        walk(child);
+      }
+    }
+    node.children = next;
+  };
+  return (tree: HastNode): void => walk(tree);
+}
+
+/** Rehype plugins — unwrap image paragraphs, then slug + autolink headings. */
 export function buildRehypePlugins(): PluggableList {
-  return [rehypeSlug, [rehypeAutolinkHeadings, { behavior: "wrap" }]];
+  return [
+    rehypeUnwrapImages,
+    rehypeSlug,
+    [rehypeAutolinkHeadings, { behavior: "wrap" }],
+  ];
 }
 
 type AnchorProps = ComponentProps<"a">;
@@ -156,12 +209,29 @@ export function buildMarkdownComponents(
     },
     img: ({ src, alt, width, height }: ImageProps): ReactElement | null => {
       if (!src) return null;
+      // Resolve a relative image (`./assets/x.png`, `../img/x.png`, `x.png`)
+      // against the article's directory and route it through the wiki file
+      // API. Absolute/remote/data URLs (caught by NON_WIKI_HREF_RE) pass
+      // through untouched. Without this, a relative asset src resolves against
+      // the SPA base URL (`/assets/x.png`) and 404s.
+      let resolvedSrc = String(src);
+      if (articlePath && !NON_WIKI_HREF_RE.test(resolvedSrc)) {
+        const lastSlash = articlePath.lastIndexOf("/");
+        const baseDir = lastSlash >= 0 ? articlePath.slice(0, lastSlash) : "";
+        const segments = joinWikiSegments(
+          baseDir ? baseDir.split("/") : [],
+          resolvedSrc.split(/[?#]/)[0],
+        );
+        if (segments && segments.length > 0) {
+          resolvedSrc = wikiFileUrl(segments.join("/"));
+        }
+      }
       const w =
         typeof width === "string" ? parseInt(width, 10) || undefined : width;
       const h =
         typeof height === "string" ? parseInt(height, 10) || undefined : height;
       return (
-        <ImageEmbed src={String(src)} alt={alt ?? ""} width={w} height={h} />
+        <ImageEmbed src={resolvedSrc} alt={alt ?? ""} width={w} height={h} />
       );
     },
   };

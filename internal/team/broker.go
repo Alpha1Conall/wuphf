@@ -564,6 +564,13 @@ func (b *Broker) StartOnPort(port int) error {
 	mux.HandleFunc("/wiki/list", b.requireAuth(b.handleWikiList))
 	mux.HandleFunc("/wiki/article", b.requireAuth(b.handleWikiArticle))
 	mux.HandleFunc("/wiki/catalog", b.requireAuth(b.handleWikiCatalog))
+	mux.HandleFunc("/wiki/tree", b.requireAuth(b.handleWikiTree))
+	mux.HandleFunc("/wiki/file", b.requireAuth(b.handleWikiFile))
+	// /wiki/app/ serves embedded HTML app bundles WITHOUT requireAuth: a
+	// sandboxed app has an opaque origin and cannot send the bearer token, so
+	// (like /web-token) the handler's loopback RemoteAddr + Host gate is the
+	// boundary. Trailing slash = path-prefix route.
+	mux.HandleFunc("/wiki/app/", b.handleWikiApp)
 	mux.HandleFunc("/wiki/audit", b.requireAuth(b.handleWikiAudit))
 	mux.HandleFunc("/wiki/visual", b.requireAuth(b.handleWikiVisualArtifact))
 	mux.HandleFunc("/wiki/archive/sweep", b.requireAuth(b.handleWikiArchiveSweep))
@@ -574,6 +581,16 @@ func (b *Broker) StartOnPort(port int) error {
 	mux.HandleFunc("/wiki/extract/replay", b.requireAuth(b.handleWikiExtractReplay))
 	mux.HandleFunc("/wiki/dlq", b.requireAuth(b.handleWikiDLQ))
 	mux.HandleFunc("/wiki/compress", b.requireAuth(b.handleWikiCompress))
+	mux.HandleFunc("/wiki/page", b.requireAuth(b.handleWikiPageDelete))
+	mux.HandleFunc("/wiki/page/create", b.requireAuth(b.handleWikiPageCreate))
+	mux.HandleFunc("/wiki/page/move", b.requireAuth(b.handleWikiPageMove))
+	mux.HandleFunc("/wiki/page/rename", b.requireAuth(b.handleWikiPageRename))
+	mux.HandleFunc("/wiki/upload", b.requireAuth(b.handleWikiUpload))
+	// Slice 5: per-article version history, per-commit diff, append-only restore.
+	// /wiki/history/ is a path-prefix route — the article path is the suffix.
+	mux.HandleFunc("/wiki/history/", b.requireAuth(b.handleWikiHistory))
+	mux.HandleFunc("/wiki/diff", b.requireAuth(b.handleWikiDiff))
+	mux.HandleFunc("/wiki/restore", b.requireAuth(b.handleWikiRestore))
 	mux.HandleFunc("/notebook/write", b.requireAuth(b.handleNotebookWrite))
 	mux.HandleFunc("/notebook/read", b.requireAuth(b.handleNotebookRead))
 	mux.HandleFunc("/notebook/entry", b.requireAuth(b.handleNotebookEntry))

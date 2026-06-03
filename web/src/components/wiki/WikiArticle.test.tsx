@@ -1,9 +1,54 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as richApi from "../../api/richArtifacts";
 import * as api from "../../api/wiki";
+import { requestOpenInEdit } from "./openInEditTarget";
 import WikiArticle from "./WikiArticle";
+
+// WikiArticle now reads the wiki-tree React Query (the article delete control
+// invalidates it so a deleted page leaves the sidebar index), so renders need
+// a QueryClient in context. Wrap via the `wrapper` option so `rerender` keeps
+// the provider. Fresh client per render isolates tests; retries off so error
+// states surface immediately.
+function render(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  return rtlRender(ui, { wrapper: Wrapper });
+}
+
+// WikiArticle's Edit tab mounts the WYSIWYG WikiEditor, which lazy-loads the
+// real Tiptap/ProseMirror stack (RefCloneEditor). Stub that module with a
+// controlled textarea that mirrors the props.onChange contract so the
+// article-level save/refresh flow is exercised without booting ProseMirror in
+// tests. (The legacy ./editor/TiptapWikiEditor is also stubbed for any path
+// that still references it.)
+const editorStub = ({
+  content,
+  onChange,
+}: {
+  content: string;
+  onChange: (markdown: string) => void;
+}) => (
+  <textarea
+    data-testid="wk-tiptap-stub"
+    value={content}
+    onChange={(e) => onChange(e.target.value)}
+  />
+);
+vi.mock("./editor/refclone/RefCloneEditor", () => ({ default: editorStub }));
+vi.mock("./editor/TiptapWikiEditor", () => ({ default: editorStub }));
 
 const CATALOG: api.WikiCatalogEntry[] = [
   {
@@ -108,7 +153,11 @@ describe("<WikiArticle content>", () => {
     getByRole("button", { name: "Raw markdown" }).click();
     await waitFor(() => expect(getByText(/## Heading A/)).toBeInTheDocument());
     getByRole("button", { name: "History" }).click();
-    await waitFor(() => expect(getByText(/streams from/)).toBeInTheDocument());
+    // The History tab now mounts the real VersionHistory panel. With the
+    // default empty fetchHistory stub it lands on its empty state.
+    await waitFor(() =>
+      expect(getByText(/no version history yet/i)).toBeInTheDocument(),
+    );
   });
 
   it("renders a paired visual artifact inline at the top of the Article tab (no separate Visual tab)", async () => {
@@ -642,7 +691,10 @@ describe("<WikiArticle history and refresh>", () => {
 
     await screen.findByText("Original body");
     fireEvent.click(screen.getByRole("button", { name: "Edit source" }));
-    fireEvent.change(screen.getByTestId("wk-editor-textarea"), {
+    const editor = (await screen.findByTestId(
+      "wk-tiptap-stub",
+    )) as HTMLTextAreaElement;
+    fireEvent.change(editor, {
       target: { value: "Updated body" },
     });
     fireEvent.change(screen.getByTestId("wk-editor-commit"), {
@@ -936,5 +988,115 @@ describe("<WikiArticle synthesis status>", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.queryByText("generating brief…")).not.toBeInTheDocument();
+  });
+});
+
+describe("<WikiArticle open-in-edit hand-off>", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  it("opens a freshly-created page directly in the editor tab", async () => {
+    vi.spyOn(api, "fetchArticle").mockResolvedValue({
+      ...STUB_ARTICLE,
+      path: "team/playbooks/onboarding.md",
+      title: "Onboarding",
+      content: "# Onboarding\n",
+    });
+    // Simulate the tree's create flow parking the intent before navigating.
+    requestOpenInEdit("team/playbooks/onboarding.md");
+
+    render(
+      <WikiArticle
+        path="team/playbooks/onboarding.md"
+        catalog={[]}
+        onNavigate={() => {}}
+      />,
+    );
+
+    // The Edit tab is active and the editor surface mounts without the user
+    // having to click "Edit source" first.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Edit source" })).toHaveClass(
+        "active",
+      ),
+    );
+    expect(await screen.findByTestId("wk-tiptap-stub")).toBeInTheDocument();
+  });
+
+  it("opens an existing page (no pending intent) in the read view", async () => {
+    vi.spyOn(api, "fetchArticle").mockResolvedValue(STUB_ARTICLE);
+
+    render(
+      <WikiArticle
+        path="people/customer-x"
+        catalog={[]}
+        onNavigate={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Customer X" });
+    expect(screen.getByRole("button", { name: "Article" })).toHaveClass(
+      "active",
+    );
+    expect(screen.queryByTestId("wk-tiptap-stub")).toBeNull();
+  });
+});
+
+describe("<WikiArticle delete affordance>", () => {
+  it("confirms before deleting, then deletes and navigates away on success", async () => {
+    vi.spyOn(api, "fetchArticle").mockResolvedValue(STUB_ARTICLE);
+    const deleteSpy = vi.spyOn(api, "deletePage").mockResolvedValue({
+      path: STUB_ARTICLE.path,
+      commit_sha: "del0001",
+    });
+    const onNavigate = vi.fn();
+
+    render(
+      <WikiArticle
+        path="people/customer-x"
+        catalog={[]}
+        onNavigate={onNavigate}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Customer X" });
+    fireEvent.click(screen.getByTestId("wk-article-delete"));
+
+    // The confirm dialog appears first — no delete yet (tell-don't-ask veto).
+    expect(screen.getByTestId("wk-article-delete-confirm")).toBeInTheDocument();
+    expect(deleteSpy).not.toHaveBeenCalled();
+    // Initial focus lands on Cancel so a stray Enter cancels rather than deletes.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus(),
+    );
+
+    fireEvent.click(screen.getByTestId("wk-article-delete-confirm-btn"));
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledTimes(1));
+    expect(deleteSpy).toHaveBeenCalledWith("people/customer-x");
+    // On success the user is sent back to the catalog (empty path).
+    await waitFor(() => expect(onNavigate).toHaveBeenCalledWith(""));
+  });
+
+  it("surfaces an error and keeps the user on the page when delete fails", async () => {
+    vi.spyOn(api, "fetchArticle").mockResolvedValue(STUB_ARTICLE);
+    vi.spyOn(api, "deletePage").mockRejectedValue(new Error("broker down"));
+    const onNavigate = vi.fn();
+
+    render(
+      <WikiArticle
+        path="people/customer-x"
+        catalog={[]}
+        onNavigate={onNavigate}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Customer X" });
+    fireEvent.click(screen.getByTestId("wk-article-delete"));
+    fireEvent.click(screen.getByTestId("wk-article-delete-confirm-btn"));
+
+    expect(await screen.findByText("broker down")).toBeInTheDocument();
+    // The page is still here; no navigation away on failure.
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 });
