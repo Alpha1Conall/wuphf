@@ -24,11 +24,14 @@ const AGENT_COLORS: Record<string, string> = {
   designer: "#F778BA",
   cmo: "#FFA657",
   cro: "#79C0FF",
+  jim: "#8FB3D1",
   pam: "#F4B6C2",
   nex: "#56D4DD",
 };
 
 const AGENT_COLOR_ALIASES: Record<string, string> = {
+  halpert: "jim",
+  "jim-halpert": "jim",
   planner: "pm",
   product: "pm",
   "product-manager": "pm",
@@ -72,6 +75,7 @@ const RESERVED_DYNAMIC_AVATAR_IDS = new Set([
   "hybridCeo",
   "hybridGeneric",
   "hybridHuman",
+  "hybridJim",
   "hybridPam",
   "hybridPamCute",
 ]);
@@ -96,6 +100,12 @@ const PROCEDURAL_ACCENTS = [
   "#FFD866",
   "#C9D1D9",
 ];
+
+const PORTRAIT_SPRITE_ALIASES: Record<string, string> = {
+  jim: "office20",
+  halpert: "office20",
+  "jim-halpert": "office20",
+};
 
 function hashSlug(slug: string): number {
   let h = 0x811c9dc5;
@@ -173,6 +183,10 @@ function buildProceduralOfficePortrait(slug: string): KnownAvatarSprite {
 
 export function resolvePortraitSprite(slug: string): KnownAvatarSprite {
   const normalized = slug.trim().toLowerCase();
+  const portraitID = PORTRAIT_SPRITE_ALIASES[normalized];
+  const portrait = portraitID ? KNOWN_AVATAR_SPRITES[portraitID] : undefined;
+  if (portrait) return portrait;
+
   const known = resolveKnownPortraitSprite(normalized);
   if (known) return known;
 
@@ -217,6 +231,25 @@ export function drawPixelAvatar(
   size: number,
 ): void {
   const avatar = resolvePortraitSprite(slug);
+  drawPixelAvatarSprite(canvas, avatar, size);
+}
+
+export function drawKnownPixelAvatar(
+  canvas: HTMLCanvasElement,
+  spriteID: string,
+  size: number,
+): void {
+  const avatar = KNOWN_AVATAR_SPRITES[spriteID];
+  if (!avatar) return;
+
+  drawPixelAvatarSprite(canvas, avatar, size);
+}
+
+function drawPixelAvatarSprite(
+  canvas: HTMLCanvasElement,
+  avatar: KnownAvatarSprite,
+  size: number,
+): void {
   const sprite = avatar.portrait;
   const palette = paletteFromHexes(avatar.palette);
 
