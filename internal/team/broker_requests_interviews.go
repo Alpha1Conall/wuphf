@@ -41,7 +41,7 @@ func requestIsHumanInterview(req humanInterview) bool {
 
 func requestNeedsHumanDecision(req humanInterview) bool {
 	switch strings.TrimSpace(req.Kind) {
-	case "approval", "confirm", "choice":
+	case "approval", "confirm", "choice", "connect", "fallback":
 		return true
 	default:
 		return req.Required
@@ -58,6 +58,22 @@ func requestOptionDefaults(kind string) ([]interviewOption, string) {
 			{ID: "reject", Label: "Reject", Description: "Do not proceed with this."},
 			{ID: "reject_with_steer", Label: "Reject with steer", Description: "Do not proceed as proposed. Redirect the team with clearer steering.", RequiresText: true, TextHint: "Type the steering, redirect, or rationale for rejecting this request."},
 		}, "approve"
+	case "connect":
+		// A typed connection decision (the user's "block on a Connect decision"
+		// call). connect drives the existing Composio OAuth flow; skip abandons
+		// the parked external action. Neither needs free text.
+		return []interviewOption{
+			{ID: "connect", Label: "Connect", Description: "Authorize this integration so the team can run the action."},
+			{ID: "skip", Label: "Skip", Description: "Do not connect. Cancel this external action."},
+		}, "connect"
+	case "fallback":
+		// A platform with no Composio path: the human completes the action
+		// manually (mark_done) or abandons it (skip). One CLI is product-removed,
+		// so manual handoff is the only fallback.
+		return []interviewOption{
+			{ID: "mark_done", Label: "Mark done", Description: "I completed this manually outside the team."},
+			{ID: "skip", Label: "Skip", Description: "Do not do this. Cancel the action."},
+		}, "mark_done"
 	case "confirm":
 		return []interviewOption{
 			{ID: "confirm_proceed", Label: "Confirm", Description: "Looks good. Proceed as planned."},
@@ -213,6 +229,12 @@ func formatRequestAnswerMessage(req humanInterview, answer interviewAnswer) stri
 			return fmt.Sprintf("Asked @%s for more information: %s", req.From, custom)
 		}
 		return fmt.Sprintf("Asked @%s for more information.", req.From)
+	case "connect":
+		return fmt.Sprintf("Connected the integration @%s needs.", req.From)
+	case "mark_done":
+		return fmt.Sprintf("Marked @%s's manual handoff done.", req.From)
+	case "skip":
+		return fmt.Sprintf("Skipped @%s's request.", req.From)
 	}
 	if custom != "" && strings.TrimSpace(answer.ChoiceText) != "" {
 		return fmt.Sprintf("Answered @%s's request with %s: %s", req.From, answer.ChoiceText, custom)
@@ -392,6 +414,10 @@ func (b *Broker) handlePostRequest(w http.ResponseWriter, r *http.Request) {
 		ReplyTo       string            `json:"reply_to"`
 		DedupeKey     string            `json:"dedupe_key"`
 		IssueID       string            `json:"issue_id"`
+		// IntegrationAction carries the structured external-action payload
+		// (slice 4b) for approval cards: typed fields + the masked raw envelope.
+		IntegrationAction    *approvalActionPayload `json:"integration_action,omitempty"`
+		ConnectionUnverified bool                   `json:"connection_unverified,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -500,24 +526,26 @@ func (b *Broker) handlePostRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		b.counter++
 		req := humanInterview{
-			ID:            fmt.Sprintf("request-%d", b.counter),
-			Kind:          normalizeRequestKind(body.Kind),
-			Status:        "pending",
-			From:          strings.TrimSpace(body.From),
-			Channel:       channel,
-			Title:         strings.TrimSpace(body.Title),
-			Question:      strings.TrimSpace(body.Question),
-			Context:       strings.TrimSpace(body.Context),
-			Options:       body.Options,
-			RecommendedID: "",
-			Blocking:      body.Blocking,
-			Required:      body.Required,
-			Secret:        body.Secret,
-			ReplyTo:       strings.TrimSpace(body.ReplyTo),
-			DedupeKey:     dedupeKey,
-			IssueID:       strings.TrimSpace(body.IssueID),
-			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
-			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+			ID:                   fmt.Sprintf("request-%d", b.counter),
+			Kind:                 normalizeRequestKind(body.Kind),
+			Status:               "pending",
+			From:                 strings.TrimSpace(body.From),
+			Channel:              channel,
+			Title:                strings.TrimSpace(body.Title),
+			Question:             strings.TrimSpace(body.Question),
+			Context:              strings.TrimSpace(body.Context),
+			Options:              body.Options,
+			RecommendedID:        "",
+			Blocking:             body.Blocking,
+			Required:             body.Required,
+			Secret:               body.Secret,
+			ReplyTo:              strings.TrimSpace(body.ReplyTo),
+			DedupeKey:            dedupeKey,
+			IssueID:              strings.TrimSpace(body.IssueID),
+			Action:               sanitizeApprovalActionPayload(body.IntegrationAction),
+			ConnectionUnverified: body.ConnectionUnverified,
+			CreatedAt:            time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt:            time.Now().UTC().Format(time.RFC3339),
 		}
 		req.Options, req.RecommendedID = normalizeRequestOptions(req.Kind, strings.TrimSpace(body.RecommendedID), req.Options)
 		if requestNeedsHumanDecision(req) {

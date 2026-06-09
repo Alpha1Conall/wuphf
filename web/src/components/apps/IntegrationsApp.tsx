@@ -23,6 +23,8 @@ import {
   startIntegrationConnection,
 } from "../../api/integrations";
 import { showNotice } from "../ui/Toast";
+import { ActionGrantsPanel } from "./integrations/ActionGrantsPanel";
+import { ComposioOnboarding } from "./integrations/ComposioOnboarding";
 import {
   IntegrationDetailHeader,
   IntegrationListRow,
@@ -769,6 +771,7 @@ export function IntegrationsApp() {
     cfg: cfgQuery.data ?? {},
     localStatuses: statusQuery.data ?? [],
   };
+  const composioKeySet = cfgQuery.data?.composio_key_set ?? false;
 
   const available = INTEGRATIONS.filter((descriptor) =>
     descriptor.isAvailable(ctx),
@@ -788,7 +791,7 @@ export function IntegrationsApp() {
         <p>External accounts, gateways, channels, and action audit.</p>
       </header>
 
-      {!(selected || selectedToolkit) && <HelpBanner />}
+      {!(selected || selectedToolkit) && composioKeySet && <HelpBanner />}
 
       {selectedToolkit ? (
         <ToolkitDetail
@@ -801,30 +804,40 @@ export function IntegrationsApp() {
           ctx={ctx}
           onBack={() => setSelectedId(null)}
         />
+      ) : !composioKeySet ? (
+        // First run: no Composio key connected → onboarding instead of an empty
+        // catalog. Once connected, config + integrations re-fetch and the home
+        // (browse + search) renders.
+        <ComposioOnboarding onConnected={() => void cfgQuery.refetch()} />
       ) : (
-        <IntegrationsHome
-          providers={integrationData?.providers ?? []}
-          search={search}
-          connected={connected}
-          toolkitItems={toolkitItems}
-          isLoading={integrationsQuery.isLoading}
-          available={available}
-          ctx={ctx}
-          onSearch={setSearch}
-          onConnected={setConnected}
-          onOpenToolkit={(item) => setSelectedToolkitKey(toolkitIdentity(item))}
-          onOpenRegistry={setSelectedId}
-          isError={integrationsQuery.isError}
-          error={integrationsQuery.error}
-          isFetching={integrationsQuery.isFetching}
-          onRetry={() => void integrationsQuery.refetch()}
-        />
+        <>
+          <IntegrationsHome
+            providers={integrationData?.providers ?? []}
+            search={search}
+            connected={connected}
+            toolkitItems={toolkitItems}
+            isLoading={integrationsQuery.isLoading}
+            available={available}
+            ctx={ctx}
+            onSearch={setSearch}
+            onConnected={setConnected}
+            onOpenToolkit={(item) => setSelectedToolkitKey(toolkitIdentity(item))}
+            onOpenRegistry={setSelectedId}
+            isError={integrationsQuery.isError}
+            error={integrationsQuery.error}
+            isFetching={integrationsQuery.isFetching}
+            onRetry={() => void integrationsQuery.refetch()}
+          />
+          <ActionGrantsPanel />
+        </>
       )}
 
-      <EmptyIntegrationsWarning
-        available={available}
-        toolkitItems={toolkitItems}
-      />
+      {composioKeySet && (
+        <EmptyIntegrationsWarning
+          available={available}
+          toolkitItems={toolkitItems}
+        />
+      )}
     </div>
   );
 }

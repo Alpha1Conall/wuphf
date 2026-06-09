@@ -144,14 +144,29 @@ type humanInterview struct {
 	// auto-resolve gate (resolveActionIssue) so every approval card has
 	// an Issue to anchor its audit trail to. Empty when the request was
 	// not action-execute-driven (e.g. raw team_request from an agent).
-	IssueID    string           `json:"issue_id,omitempty"`
-	DueAt      string           `json:"due_at,omitempty"`
-	FollowUpAt string           `json:"follow_up_at,omitempty"`
-	ReminderAt string           `json:"reminder_at,omitempty"`
-	RecheckAt  string           `json:"recheck_at,omitempty"`
-	CreatedAt  string           `json:"created_at"`
-	UpdatedAt  string           `json:"updated_at,omitempty"`
-	Answered   *interviewAnswer `json:"answered,omitempty"`
+	IssueID string `json:"issue_id,omitempty"`
+	// Platform and LogoURL anchor integration-scoped cards (connect, and later
+	// the external-action approval card) to a concrete toolkit. The web Connect
+	// card reads Platform to drive the existing Composio OAuth flow and LogoURL
+	// to render the toolkit logo. Empty for non-integration requests.
+	Platform string `json:"platform,omitempty"`
+	LogoURL  string `json:"logo_url,omitempty"`
+	// Action is the structured external-action payload (slice 4b): typed fields
+	// plus the masked raw HTTP envelope the approval card renders behind its raw
+	// toggle. Nil for non-approval requests and for legacy approvals that only
+	// carry the parsed context string.
+	Action *approvalActionPayload `json:"action,omitempty"`
+	// ConnectionUnverified is set when the action gate could not reach the
+	// resolver and degraded to approval-only, so the connection state is
+	// unconfirmed. The card surfaces a warning (review LOW #5).
+	ConnectionUnverified bool             `json:"connection_unverified,omitempty"`
+	DueAt                string           `json:"due_at,omitempty"`
+	FollowUpAt           string           `json:"follow_up_at,omitempty"`
+	ReminderAt           string           `json:"reminder_at,omitempty"`
+	RecheckAt            string           `json:"recheck_at,omitempty"`
+	CreatedAt            string           `json:"created_at"`
+	UpdatedAt            string           `json:"updated_at,omitempty"`
+	Answered             *interviewAnswer `json:"answered,omitempty"`
 }
 
 type humanInvite struct {
@@ -701,33 +716,35 @@ type brokerState struct {
 	// Incidents keeps the legacy wire key "agent_issues" so broker-state.json
 	// files written before the Issue→Incident rename still load unchanged. The
 	// in-memory/Go name is Incident; only the persisted JSON tag is frozen.
-	Incidents          []incidentRecord               `json:"agent_issues,omitempty"`
-	Members            []officeMember                 `json:"members,omitempty"`
-	Channels           []teamChannel                  `json:"channels,omitempty"`
-	SessionMode        string                         `json:"session_mode,omitempty"`
-	OneOnOneAgent      string                         `json:"one_on_one_agent,omitempty"`
-	FocusMode          bool                           `json:"focus_mode,omitempty"`
-	Tasks              []teamTask                     `json:"tasks,omitempty"`
-	Requests           []humanInterview               `json:"requests,omitempty"`
-	ApprovalAudit      []ApprovalAuditEntry           `json:"approval_audit,omitempty"`
-	Actions            []officeActionLog              `json:"actions,omitempty"`
-	Signals            []officeSignalRecord           `json:"signals,omitempty"`
-	Decisions          []officeDecisionRecord         `json:"decisions,omitempty"`
-	Watchdogs          []watchdogAlert                `json:"watchdogs,omitempty"`
-	Scheduler          []schedulerJob                 `json:"scheduler,omitempty"`
-	SchedulerRuns      map[string][]schedulerRun      `json:"scheduler_runs,omitempty"`
-	SchedulerActivity  map[string][]schedulerActivity `json:"scheduler_activity,omitempty"`
-	SchedulerRevisions map[string][]schedulerRevision `json:"scheduler_revisions,omitempty"`
-	Skills             []teamSkill                    `json:"skills,omitempty"`
-	HumanInvites       []humanInvite                  `json:"human_invites,omitempty"`
-	HumanSessions      []humanSession                 `json:"human_sessions,omitempty"`
-	SharedMemory       map[string]map[string]string   `json:"shared_memory,omitempty"`
-	Counter            int                            `json:"counter"`
-	NotificationSince  string                         `json:"notification_since,omitempty"`
-	InsightsSince      string                         `json:"insights_since,omitempty"`
-	PendingInterview   *humanInterview                `json:"pending_interview,omitempty"`
-	Usage              teamUsageState                 `json:"usage,omitempty"`
-	Policies           []officePolicy                 `json:"policies,omitempty"`
+	Incidents          []incidentRecord                   `json:"agent_issues,omitempty"`
+	Members            []officeMember                     `json:"members,omitempty"`
+	Channels           []teamChannel                      `json:"channels,omitempty"`
+	SessionMode        string                             `json:"session_mode,omitempty"`
+	OneOnOneAgent      string                             `json:"one_on_one_agent,omitempty"`
+	FocusMode          bool                               `json:"focus_mode,omitempty"`
+	Tasks              []teamTask                         `json:"tasks,omitempty"`
+	Requests           []humanInterview                   `json:"requests,omitempty"`
+	ApprovalAudit      []ApprovalAuditEntry               `json:"approval_audit,omitempty"`
+	ConnectionRegistry map[string]connectionRegistryEntry `json:"connection_registry,omitempty"`
+	ActionGrants       []actionGrant                      `json:"action_grants,omitempty"`
+	Actions            []officeActionLog                  `json:"actions,omitempty"`
+	Signals            []officeSignalRecord               `json:"signals,omitempty"`
+	Decisions          []officeDecisionRecord             `json:"decisions,omitempty"`
+	Watchdogs          []watchdogAlert                    `json:"watchdogs,omitempty"`
+	Scheduler          []schedulerJob                     `json:"scheduler,omitempty"`
+	SchedulerRuns      map[string][]schedulerRun          `json:"scheduler_runs,omitempty"`
+	SchedulerActivity  map[string][]schedulerActivity     `json:"scheduler_activity,omitempty"`
+	SchedulerRevisions map[string][]schedulerRevision     `json:"scheduler_revisions,omitempty"`
+	Skills             []teamSkill                        `json:"skills,omitempty"`
+	HumanInvites       []humanInvite                      `json:"human_invites,omitempty"`
+	HumanSessions      []humanSession                     `json:"human_sessions,omitempty"`
+	SharedMemory       map[string]map[string]string       `json:"shared_memory,omitempty"`
+	Counter            int                                `json:"counter"`
+	NotificationSince  string                             `json:"notification_since,omitempty"`
+	InsightsSince      string                             `json:"insights_since,omitempty"`
+	PendingInterview   *humanInterview                    `json:"pending_interview,omitempty"`
+	Usage              teamUsageState                     `json:"usage,omitempty"`
+	Policies           []officePolicy                     `json:"policies,omitempty"`
 }
 
 type usageTotals struct {

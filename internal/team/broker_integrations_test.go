@@ -19,6 +19,8 @@ func newIntegrationsTestServer(t *testing.T, b *Broker) *httptest.Server {
 	mux.HandleFunc("/integrations/connect-status", b.requireAuth(b.handleIntegrationConnectStatus))
 	mux.HandleFunc("/integrations/disconnect", b.requireAuth(b.handleIntegrationDisconnect))
 	mux.HandleFunc("/integrations/audit", b.requireAuth(b.handleIntegrationAudit))
+	mux.HandleFunc("/integrations/resolve", b.requireAuth(b.handleIntegrationResolve))
+	mux.HandleFunc("/integrations/grants", b.requireAuth(b.handleIntegrationGrants))
 	return httptest.NewServer(mux)
 }
 

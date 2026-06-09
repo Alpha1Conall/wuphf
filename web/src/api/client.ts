@@ -642,6 +642,39 @@ export interface AgentRequest {
    * renders a breadcrumb when set so the human sees the parent
    * Issue at a glance. */
   issue_id?: string;
+  /** Integration platform slug + logo for integration-scoped cards
+   * (connect, fallback, and external-action approvals). Drives the
+   * toolkit logo + OAuth target. Empty for non-integration requests. */
+  platform?: string;
+  logo_url?: string;
+  /** Structured external-action payload (slice 4b): typed fields + the
+   * masked raw HTTP envelope the approval card renders behind its raw
+   * toggle. Absent for legacy approvals (the card falls back to the
+   * parsed context string). */
+  action?: ActionApprovalPayload;
+  /** Set when the action gate could not reach the resolver and degraded
+   * to approval-only, so the connection state is unconfirmed. The card
+   * surfaces a warning (review LOW #5). */
+  connection_unverified?: boolean;
+}
+
+/** The masked HTTP request an external action would send. Secrets are
+ * already redacted server-side; this is display-only. */
+export interface ActionEnvelope {
+  method?: string;
+  url?: string;
+  headers?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+}
+
+export interface ActionApprovalPayload {
+  platform?: string;
+  action_id?: string;
+  verb?: string;
+  name?: string;
+  logo_url?: string;
+  account?: { name?: string; key?: string };
+  raw_envelope?: ActionEnvelope;
 }
 
 export function getRequests(channel: string) {
@@ -673,6 +706,53 @@ export function answerRequest(
 
 export function cancelRequest(id: string) {
   return post("/requests", { action: "cancel", id });
+}
+
+export interface ActionGrant {
+  id: string;
+  agent_slug: string;
+  platform: string;
+  action_scope: string;
+  channel?: string;
+  issue_id?: string;
+  granted_by: string;
+  granted_at: string;
+  expires_at?: string;
+  revoked_at?: string;
+}
+
+export interface CreateActionGrantInput {
+  agentSlug: string;
+  platform: string;
+  /** A concrete action_id — never a wildcard. The broker rejects "*". */
+  actionScope: string;
+  channel?: string;
+  issueId?: string;
+}
+
+// Mints a scoped grant so the resolver auto-approves exactly this
+// (agent, platform, action_id) without re-prompting. Backs the approval
+// modal's "Approve & always allow" button (deterministic-integrations slice 5b).
+export function createActionGrant(input: CreateActionGrantInput) {
+  return post<{ grant: ActionGrant }>("/integrations/grants", {
+    action: "grant",
+    agent_slug: input.agentSlug,
+    platform: input.platform,
+    action_scope: input.actionScope,
+    channel: input.channel,
+    issue_id: input.issueId,
+  });
+}
+
+export function getActionGrants() {
+  return get<{ grants: ActionGrant[] }>("/integrations/grants");
+}
+
+export function revokeActionGrant(id: string) {
+  return post<{ grant: ActionGrant }>("/integrations/grants", {
+    action: "revoke",
+    id,
+  });
 }
 
 // ── Signals / Decisions / Watchdogs / Actions ──

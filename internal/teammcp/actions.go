@@ -19,44 +19,6 @@ import (
 	"github.com/nex-crm/wuphf/internal/team"
 )
 
-// readOnlyActionVerbs are unambiguous information-read verbs. Matched as
-// WHOLE TOKENS (splitting action_id on - _ . / space), never as substrings —
-// substring matching is too permissive (e.g. "get" matches inside "budget",
-// "find" inside "findone_and_update", "view" inside "review_delete"). The
-// list is intentionally narrower than the operator might expect: ambiguous
-// nouns like "status", "count", "view", "query", "find", "summary" appear in
-// both read and write action names ("update_status", "post_summary",
-// "findone_and_update") and are excluded so mutating actions can never be
-// misclassified.
-var readOnlyActionVerbs = map[string]struct{}{
-	"search":    {},
-	"list":      {},
-	"read":      {},
-	"get":       {},
-	"fetch":     {},
-	"browse":    {},
-	"describe":  {},
-	"show":      {},
-	"lookup":    {},
-	"summarize": {},
-}
-
-// mutatingActionVerbs are unambiguous state-changing verbs. If ANY of these
-// appears as a whole token in the action_id, the action is never classified
-// read-only — even if a read verb is also present. This guards against
-// composite action names like "GMAIL_LIST_AND_DELETE" or "FIND_AND_UPDATE":
-// a single read verb is not enough; a single mutating verb vetoes.
-var mutatingActionVerbs = map[string]struct{}{
-	"send": {}, "create": {}, "update": {}, "delete": {}, "post": {},
-	"put": {}, "patch": {}, "remove": {}, "insert": {}, "write": {},
-	"clear": {}, "reset": {}, "archive": {}, "star": {}, "unstar": {},
-	"mark": {}, "publish": {}, "add": {}, "move": {}, "invite": {},
-	"accept": {}, "reject": {}, "approve": {}, "cancel": {}, "refund": {},
-	"charge": {}, "pay": {}, "enable": {}, "disable": {}, "revoke": {},
-	"grant": {}, "set": {}, "draft": {}, "schedule": {}, "upload": {},
-	"replace": {}, "transfer": {}, "merge": {}, "split": {},
-}
-
 // actionApprovalTimeout is how long handleTeamActionExecute will wait for a
 // human decision on a pending approval request before giving up.
 const actionApprovalTimeout = 30 * time.Minute
@@ -70,24 +32,11 @@ func actionIDSeparator(r rune) bool {
 }
 
 // actionIsReadOnly reports whether an action_id is safe to run without human
-// approval. A read-only action has at least one read verb AND no mutating
-// verb appearing as a whole token.
+// approval. It delegates to action.ActionIsReadOnly so the read/write verb
+// tables live in exactly one place — the gate and the broker resolver classify
+// identically, with no drift risk between two copies.
 func actionIsReadOnly(actionID string) bool {
-	id := strings.ToLower(strings.TrimSpace(actionID))
-	if id == "" {
-		return false
-	}
-	tokens := strings.FieldsFunc(id, actionIDSeparator)
-	hasRead := false
-	for _, tok := range tokens {
-		if _, ok := mutatingActionVerbs[tok]; ok {
-			return false
-		}
-		if _, ok := readOnlyActionVerbs[tok]; ok {
-			hasRead = true
-		}
-	}
-	return hasRead
+	return action.ActionIsReadOnly(actionID)
 }
 
 // approvalContext is the metadata requireTeamActionApproval surfaces to the
@@ -102,6 +51,12 @@ type approvalContext struct {
 	RequestedAt string
 	AnsweredAt  string
 }
+
+// grantApprovalMarker is the synthetic approval RequestID used when a standing
+// grant pre-authorized an action (no human request was created). It is
+// non-empty so recordExecuteAudit still writes an executed-OK audit row — the
+// run stays visible even though the modal was skipped.
+const grantApprovalMarker = "grant"
 
 // requireTeamActionApproval gates mutating external-action calls behind a
 // human approval request. Returns the approval context (request id + Issue
@@ -125,7 +80,7 @@ type approvalContext struct {
 //
 // The point: a prompt-injected agent cannot send email, write to a CRM, or
 // post a Slack message without the human explicitly clicking approve.
-func requireTeamActionApproval(ctx context.Context, slug, channel string, args TeamActionExecuteArgs) (approvalContext, error) {
+func requireTeamActionApproval(ctx context.Context, slug, channel string, args TeamActionExecuteArgs, preApproved bool, actionCard *actionCardPayload, connectionUnverified bool) (approvalContext, error) {
 	if args.DryRun {
 		return approvalContext{}, nil
 	}
@@ -169,6 +124,22 @@ func requireTeamActionApproval(ctx context.Context, slug, channel string, args T
 		}
 	}
 
+	// Standing-grant short-circuit. A human-issued grant covers this exact
+	// action, so the resolver returned `proceed` and the gate set preApproved.
+	// Skip the human prompt — but only AFTER the Issue/drafting gate above, so a
+	// grant for the integration can never bypass an Issue that is still awaiting
+	// human approval. The synthetic "grant" request id keeps recordExecuteAudit
+	// writing a trail (transparency: the human still sees the action ran).
+	if preApproved {
+		grantedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		return approvalContext{
+			RequestID:   grantApprovalMarker,
+			IssueID:     strings.TrimSpace(args.IssueID),
+			RequestedAt: grantedAt,
+			AnsweredAt:  grantedAt,
+		}, nil
+	}
+
 	spec := buildActionApprovalSpec(slug, channel, args)
 
 	options, recommendedID := normalizeHumanRequestOptions("approval", "", nil)
@@ -183,7 +154,7 @@ func requireTeamActionApproval(ctx context.Context, slug, channel string, args T
 	var created struct {
 		ID string `json:"id"`
 	}
-	if err := brokerPostJSON(ctx, "/requests", map[string]any{
+	requestBody := map[string]any{
 		"kind":           "approval",
 		"channel":        channel,
 		"from":           slug,
@@ -200,7 +171,17 @@ func requireTeamActionApproval(ctx context.Context, slug, channel string, args T
 		// (Bug B Layer 2). The broker ignores unknown fields today, so
 		// shipping this is safe and unblocks the follow-up slice.
 		"issue_id": strings.TrimSpace(args.IssueID),
-	}, &created); err != nil {
+	}
+	// Structured action payload + connection-unverified signal (slice 4b /
+	// review LOW #5). Only attached when present so legacy consumers are
+	// unaffected.
+	if actionCard != nil {
+		requestBody["integration_action"] = actionCard
+	}
+	if connectionUnverified {
+		requestBody["connection_unverified"] = true
+	}
+	if err := brokerPostJSON(ctx, "/requests", requestBody, &created); err != nil {
 		return approvalContext{}, fmt.Errorf("create approval request: %w", err)
 	}
 	if strings.TrimSpace(created.ID) == "" {
@@ -737,12 +718,71 @@ func handleTeamActionExecute(ctx context.Context, _ *mcp.CallToolRequest, args T
 	}
 	channel := resolveConversationChannel(ctx, slug, args.Channel)
 
+	// Deterministic pre-flight connection gate. Before any human approval or
+	// provider call, classify a MUTATING action against the live connection
+	// state so it can never fire blind into a missing, expired, or unreachable
+	// integration. Read-only actions skip this gate: gating them would double
+	// the provider calls on the hot lookup path, and the hard guarantee only
+	// needs to cover side-effecting actions. DryRun and WUPHF_UNSAFE bypass —
+	// a dry run sends nothing, and unsafe is the operator escape hatch. If the
+	// resolver itself is unreachable we degrade to the human approval gate
+	// below rather than bricking every external action.
+	preApproved := false
+	var actionCard *actionCardPayload
+	connectionUnverified := false
+	if !args.DryRun && os.Getenv("WUPHF_UNSAFE") != "1" && !actionIsReadOnly(args.ActionID) {
+		decision, derr := resolveActionDecision(ctx, slug, channel, args)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "teammcp: action resolve failed for %s/%s: %v; falling back to approval-only gate\n", args.Platform, args.ActionID, derr)
+			// The connection state is unconfirmed — the approval card warns
+			// the human that we could not verify the integration (review LOW #5).
+			connectionUnverified = true
+		} else {
+			switch strings.ToLower(strings.TrimSpace(decision.Decision)) {
+			case "connect", "wait", "fail_safe", "fallback":
+				return toolError(fmt.Errorf("%s", actionResolveBlockMessage(decision, platformDisplay(args.Platform)))), nil, nil
+			case "proceed":
+				// `proceed` for a MUTATING action means a standing, human-issued
+				// grant covers this exact (agent, platform, action_id): skip the
+				// approval modal. The resolver is the sole authority for this —
+				// the grant store is human-minted broker state, so a
+				// prompt-injected agent cannot forge its way to `proceed`. The
+				// Issue/drafting gate inside requireTeamActionApproval still runs.
+				if decision.Account != nil && strings.TrimSpace(decision.Account.Key) != "" {
+					args.ConnectionKey = strings.TrimSpace(decision.Account.Key)
+				}
+				preApproved = true
+			case "approve":
+				// Use the connection the resolver actually verified, not the
+				// (often blank or stale) key the agent guessed. This is what
+				// closes the "fires into the wrong/missing connection" gap.
+				if decision.Account != nil && strings.TrimSpace(decision.Account.Key) != "" {
+					args.ConnectionKey = strings.TrimSpace(decision.Account.Key)
+				}
+				// Carry the structured payload (typed fields + masked envelope)
+				// onto the approval card so it renders the real request, not a
+				// reconstruction (slice 4b).
+				actionCard = buildActionCardPayload(args, decision)
+			default:
+				// Fail closed. The resolver answered (derr == nil) but with a
+				// decision this gate does not recognize — an empty body, a new
+				// verdict the broker added without updating the gate, or a
+				// tampered response. An unrecognized decision must NEVER become
+				// an implicit proceed; block and let the agent retry.
+				return toolError(fmt.Errorf(
+					"%s could not be resolved (unrecognized decision %q); not running the action — retry shortly",
+					platformDisplay(args.Platform), strings.TrimSpace(decision.Decision),
+				)), nil, nil
+			}
+		}
+	}
+
 	// Human-in-the-loop gate. Mutating external actions — sending email,
 	// posting to Slack, writing a CRM row, etc. — require explicit human
 	// approval unless --unsafe was passed or the action is a read-only
 	// lookup. A prompt-injected agent must not be able to trigger real
 	// side-effects silently.
-	approvalCtx, err := requireTeamActionApproval(ctx, slug, channel, args)
+	approvalCtx, err := requireTeamActionApproval(ctx, slug, channel, args, preApproved, actionCard, connectionUnverified)
 	if err != nil {
 		return toolError(err), nil, nil
 	}
