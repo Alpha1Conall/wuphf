@@ -37,17 +37,6 @@ type notifyDedupKey struct {
 }
 
 func (l *Launcher) deliverMessageNotification(msg channelMessage) {
-	// demo_seed messages exist purely to make #general feel staffed on first
-	// paint; they must never wake an agent or burn an LLM call. Filter at
-	// the central delivery point (not just notifyAgentsLoop) so other
-	// callers — primeVisibleAgents, replays, future routes — can't bypass
-	// it. Today these don't actually route demo_seed targets because the
-	// lead is the From and Tagged is empty, but a future @all-default
-	// change would silently turn the demo seed into an LLM-burning
-	// broadcast. One filter, one place.
-	if msg.Kind == "demo_seed" {
-		return
-	}
 	// Phase 2 onboarding is fully deterministic — the broker emits CEO
 	// cards from ceoDeterministicMessages and the user replies via the
 	// structured-card POST handlers. The CEO agent must NOT fire an LLM
@@ -170,16 +159,36 @@ func (l *Launcher) sendTaskUpdate(target notificationTarget, action officeAction
 	// Review, and ChangesRequested tasks are blocked here — agents may still
 	// post comments via the comment endpoint, which does not go through this
 	// path. ErrIssueNotApproved is the sentinel; log and drop (no retry).
-	if task.LifecycleState != "" && !isExecutableTeamTaskStatus(task.LifecycleState) {
+	// task_followup bypasses the gate by design: it targets DELIVERED
+	// (terminal) tasks — the human posted after delivery and the owner must
+	// wake to answer or reopen (done-integrity fix family).
+	if action.Kind != taskFollowUpActionKind &&
+		task.LifecycleState != "" && !isExecutableTeamTaskStatus(task.LifecycleState) {
+		return
+	}
+	// Scoped interview gate (v3 fix family #2): while THIS agent waits on
+	// its own human interview, its current turn is parked in the
+	// /interview/answer poll — enqueueing a new turn would duplicate work
+	// once the answer lands. Suppress only this agent; every other agent
+	// keeps working (the old office-wide drop wedged the whole office
+	// behind one buried card, [19:23:59]).
+	if l.broker != nil && l.broker.AgentAwaitingInterviewAnswer(target.Slug) {
 		return
 	}
 	channel := normalizeChannelSlug(task.Channel)
 	if channel == "" {
 		channel = "general"
 	}
-	notification := l.buildTaskExecutionPacket(target.Slug, action, task, content)
+	notification, contextUsed := l.notifyCtx().BuildTaskExecutionPacketWithContext(target.Slug, action, task, content)
 	if l.targeter().ShouldUseHeadlessForTarget(target) {
-		l.enqueueHeadlessCodexTurn(target.Slug, headlessSandboxNote()+notification, channel)
+		prompt := headlessSandboxNote() + notification
+		l.enqueueHeadlessCodexTurnRecord(target.Slug, headlessCodexTurn{
+			Prompt:      prompt,
+			Channel:     channel,
+			TaskID:      task.ID,
+			ContextUsed: contextUsed,
+			EnqueuedAt:  time.Now(),
+		})
 		return
 	}
 	l.paneDispatch().Enqueue(target.Slug, target.PaneTarget, notification)
@@ -246,22 +255,22 @@ func (l *Launcher) buildMessageWorkPacket(msg channelMessage, slug string) strin
 }
 
 func (l *Launcher) buildTaskExecutionPacket(slug string, action officeActionLog, task teamTask, content string) string {
-	packet := l.notifyCtx().BuildTaskExecutionPacket(slug, action, task, content)
-	// Plan mode (Phase 5): a task in Planning gets a plan-only directive in
-	// front of the packet so the owner writes a plan (to its notebook) and stops
-	// before executing.
-	if task.LifecycleState == LifecycleStatePlanning {
-		return planModeDirective(task) + packet
-	}
-	return packet
+	return l.notifyCtx().BuildTaskExecutionPacket(slug, action, task, content)
 }
 
 func (l *Launcher) sendChannelUpdate(target notificationTarget, msg channelMessage) {
+	// Scoped interview gate — same contract as sendTaskUpdate: suppress
+	// new turns ONLY for the agent whose own interview is pending (its
+	// turn is parked in the answer poll); everyone else keeps working.
+	if l.broker != nil && l.broker.AgentAwaitingInterviewAnswer(target.Slug) {
+		return
+	}
 	channel := normalizeChannelSlug(msg.Channel)
 	if channel == "" {
 		channel = "general"
 	}
 	notification := ""
+	var contextUsed []string
 	humanPrefix := ""
 	fromHuman := isHumanMessageSender(msg.From)
 	if fromHuman {
@@ -279,7 +288,8 @@ func (l *Launcher) sendChannelUpdate(target notificationTarget, msg channelMessa
 			humanPrefix, msg.From, truncate(msg.Content, 1000), l.responseInstructionForTarget(msg, target.Slug), target.Slug, channel, msg.ID,
 		)
 	} else {
-		packet := l.buildMessageWorkPacket(msg, target.Slug)
+		var packet string
+		packet, contextUsed = l.notifyCtx().BuildMessageWorkPacketWithContext(msg, target.Slug)
 		notification = fmt.Sprintf(
 			"%s%s\n---\n[New from @%s]: %s\n%s This packet is your complete context — do NOT call team_poll or team_tasks. Just do the work and reply via team_broadcast with my_slug \"%s\", channel \"%s\", reply_to_id \"%s\". Once you have posted the needed update, STOP and wait for the next pushed notification.",
 			humanPrefix, packet, msg.From, truncate(msg.Content, 1000), l.responseInstructionForTarget(msg, target.Slug), target.Slug, channel, msg.ID,
@@ -289,11 +299,12 @@ func (l *Launcher) sendChannelUpdate(target notificationTarget, msg channelMessa
 	if l.targeter().ShouldUseHeadlessForTarget(target) {
 		prompt := headlessSandboxNote() + notification
 		l.enqueueHeadlessCodexTurnRecord(target.Slug, headlessCodexTurn{
-			Prompt:     prompt,
-			Channel:    channel,
-			TaskID:     headlessCodexTaskID(prompt),
-			FromHuman:  fromHuman,
-			EnqueuedAt: time.Now(),
+			Prompt:      prompt,
+			Channel:     channel,
+			TaskID:      headlessCodexTaskID(prompt),
+			FromHuman:   fromHuman,
+			ContextUsed: contextUsed,
+			EnqueuedAt:  time.Now(),
 		})
 		return
 	}

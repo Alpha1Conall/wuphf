@@ -114,6 +114,40 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Default timeout for read (GET) requests. Without it, a wedged broker
+ * left every list surface on an eternal spinner (the Notebooks tab sat
+ * on "Loading bookshelf…" for 60s+ in the v3 eval) because plain
+ * `fetch` never gives up. 20s is generous for any healthy list
+ * endpoint while still letting surfaces flip to an honest
+ * "broker not responding — retry" state. Callers with a longer-running
+ * read can pass their own `timeoutMs`.
+ */
+export const GET_TIMEOUT_MS = 20_000;
+
+interface GetOptions {
+  signal?: AbortSignal;
+  /** Override the default GET_TIMEOUT_MS for slow endpoints. */
+  timeoutMs?: number;
+}
+
+/**
+ * Builds the signal for a GET: the caller's signal when provided,
+ * otherwise a timeout signal so no read can hang forever. Exported for
+ * the regression test pinning the no-eternal-spinner contract.
+ */
+export function getRequestSignal(options?: GetOptions): AbortSignal {
+  if (options?.signal) return options.signal;
+  return AbortSignal.timeout(options?.timeoutMs ?? GET_TIMEOUT_MS);
+}
+
+function describeGetError(err: unknown): Error | null {
+  if (err instanceof Error && err.name === "TimeoutError") {
+    return new Error("Broker not responding — request timed out.");
+  }
+  return null;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
@@ -141,6 +175,7 @@ export class ApiError extends Error {
 export async function get<T = unknown>(
   path: string,
   params?: Record<string, string | number | boolean | null | undefined>,
+  options?: GetOptions,
 ): Promise<T> {
   let url = baseURL() + path;
   if (params) {
@@ -152,7 +187,15 @@ export async function get<T = unknown>(
       .join("&");
     if (qs) url += `?${qs}`;
   }
-  const r = await fetch(url, { headers: authHeaders() });
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      headers: authHeaders(),
+      signal: getRequestSignal(options),
+    });
+  } catch (err) {
+    throw describeGetError(err) ?? err;
+  }
   if (!r.ok) {
     throw await apiErrorFromResponse(r);
   }
@@ -162,6 +205,7 @@ export async function get<T = unknown>(
 export async function getText(
   path: string,
   params?: Record<string, string | number | boolean | null | undefined>,
+  options?: GetOptions,
 ): Promise<string> {
   let url = baseURL() + path;
   if (params) {
@@ -173,7 +217,15 @@ export async function getText(
       .join("&");
     if (qs) url += `?${qs}`;
   }
-  const r = await fetch(url, { headers: authHeaders() });
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      headers: authHeaders(),
+      signal: getRequestSignal(options),
+    });
+  } catch (err) {
+    throw describeGetError(err) ?? err;
+  }
   if (!r.ok) {
     throw await apiErrorFromResponse(r);
   }
@@ -333,7 +385,6 @@ export interface Message {
    * Server-assigned message kind. Empty/absent for plain chat. Known kinds:
    *  - "agent_issue"        legacy agent-authored issue banner
    *  - "system_auth_error"  system-authored provider-auth failure card (#933)
-   *  - "issue_draft_section" CEO-authored issue draft section
    *  - "ceo_*"              onboarding cards (form_field, chip_row, etc.)
    * The SPA's MessageBubble dispatches on this field to pick a renderer.
    */
@@ -483,12 +534,6 @@ export interface OfficeMember {
   task?: string;
   channel?: string;
   provider?: ProviderBinding | string;
-  /**
-   * Agent autonomy. "plan" → the agent's tasks plan-first by default (the owner
-   * runs read-only in the provider's native plan mode and waits for Approve &
-   * Start); "auto" → executes immediately. Serialized as `permission_mode`.
-   */
-  permission_mode?: string;
   /** Broker-provided: serialized as `built_in`. Built-ins cannot be removed. (CEO is guarded by a separate slug check.) */
   built_in?: boolean;
   /** Per-channel disabled state when the list is sourced from `/members?channel=…`. */
@@ -609,10 +654,6 @@ export interface SkillSimilarRef {
 }
 
 export interface InterviewMetadata {
-  /** Set on enhance_skill_proposal interviews (PR 7 task #15). */
-  enhances_slug?: string;
-  /** Set on ambiguous-band skill_proposal interviews (PR 7 task #15). */
-  similar_to_existing?: SkillSimilarRef;
   [key: string]: unknown;
 }
 
@@ -636,10 +677,8 @@ export interface AgentRequest {
   updated_at?: string;
   /** Echoes the entity slug the request is about (e.g. a skill name). */
   reply_to?: string;
-  /** Structured metadata. Used by the enhance-existing UX (PR 7 task #14). */
+  /** Structured metadata attached by the broker (kind-specific). */
   metadata?: InterviewMetadata;
-  /** Full candidate spec on enhance_skill_proposal interviews. */
-  enhance_candidate?: Skill;
   redacted?: boolean;
   redaction_count?: number;
   redaction_reasons?: string[];
@@ -848,7 +887,7 @@ export interface Skill {
   updated_at?: string;
   /** Per-agent scoping (PR 7). Empty/missing = lead-routable shared skill. */
   owner_agents?: OwnerAgents;
-  /** Set on ambiguous-band proposals by the similarity gate (PR 7 task #15). */
+  /** Set by the similarity gate when this skill resembles another (legacy records). */
   similar_to_existing?: SkillSimilarRef;
   metadata?: SkillMetadata;
 }
@@ -905,10 +944,10 @@ export interface SkillOwnerToggleResponse {
 }
 
 /**
- * Enable a specific skill for a specific agent. Adds the agent slug to
+ * Assign a specific skill to a specific agent. Adds the agent slug to
  * the skill's owner_agents list (idempotent). Only OwnerAgents members
- * can invoke a skill via team_skill_run — see the AVAILABLE SKILLS /
- * DISCOVERABLE SKILLS split in the agent prompt.
+ * see the skill in their AVAILABLE SKILLS prompt block and can invoke
+ * it via team_skill_run.
  */
 export function enableSkillForAgent(
   name: string,

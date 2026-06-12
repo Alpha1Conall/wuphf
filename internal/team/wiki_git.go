@@ -308,6 +308,26 @@ func (r *Repo) Commit(ctx context.Context, slug, relPath, content, mode, message
 	var bytesWritten int
 	switch mode {
 	case "create", "replace":
+		// Byte-identical fold (ten-out-of-ten A4): a replace whose content
+		// matches the file already on disk AND already committed is a no-op —
+		// return HEAD without rewriting the file. The rewrite used to bump
+		// the article's mtime, which changed index/all.md ("updated <mtime>"
+		// rows), which made the staged diff non-empty, which turned every
+		// identical retry into a real commit (v3 [20:15]: the same "confirm
+		// contact" change triple-committed). The git-status guard keeps the
+		// fold away from externally-written files (the Obsidian watcher
+		// writes content to disk first, then asks the repo to commit it —
+		// that path is dirty, never folded).
+		if existing, readErr := os.ReadFile(fullPath); readErr == nil && string(existing) == content {
+			porcelain, statusErr := r.runGitLocked(ctx, "system", "status", "--porcelain", "--", filepath.ToSlash(relPath))
+			if statusErr == nil && strings.TrimSpace(porcelain) == "" {
+				headSha, headErr := r.runGitLocked(ctx, "system", "rev-parse", "--short", "HEAD")
+				if headErr != nil {
+					return "", 0, fmt.Errorf("wiki: resolve HEAD sha: %w", headErr)
+				}
+				return strings.TrimSpace(headSha), len(content), nil
+			}
+		}
 		if err := os.WriteFile(fullPath, []byte(content), 0o600); err != nil {
 			return "", 0, fmt.Errorf("wiki: write article: %w", err)
 		}
@@ -1119,6 +1139,27 @@ func (r *Repo) stageAllLocked(ctx context.Context) error {
 		return fmt.Errorf("wiki: git add -A: %w: %s", err, out)
 	}
 	return nil
+}
+
+// PathDirty reports whether relPath differs from its committed HEAD state
+// (modified or untracked). The Obsidian watcher uses this to distinguish a
+// REAL external edit from the fsnotify echo of an internal committed write:
+// after the wiki worker (or a promotion apply) writes-and-commits, the file
+// is byte-identical to HEAD by the time the watcher's debounce fires, so
+// there is nothing external to attribute. Without this check the watcher
+// stamped a fresh `last_human_edit_ts` sentinel on every echo — content
+// always differed, so every agent-authored commit was followed by a
+// human-attributed "wiki: external edit" commit, and that sentinel commit
+// re-triggered the watcher into a commit storm (B3 + B4: the v3 run's
+// all-human git history and "173 revisions" on a minutes-old article).
+func (r *Repo) PathDirty(ctx context.Context, relPath string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out, err := r.runGitLocked(ctx, "system", "status", "--porcelain", "--", filepath.ToSlash(relPath))
+	if err != nil {
+		return false, fmt.Errorf("wiki: git status %s: %w", relPath, err)
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // runGitLocked runs `git` with per-commit identity flags in the repo root.

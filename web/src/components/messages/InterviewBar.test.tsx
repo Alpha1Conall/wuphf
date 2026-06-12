@@ -18,17 +18,6 @@ vi.mock("../../api/client", async () => {
     );
   return {
     ...actual,
-    getSkillsList: vi.fn().mockResolvedValue({
-      skills: [
-        {
-          name: "send-digest",
-          title: "Send weekly digest",
-          description: "Compile and send the weekly customer digest.",
-          status: "active",
-          content: "## Steps\n1. gather digest items\n2. send",
-        },
-      ],
-    }),
     answerRequest: vi.fn().mockResolvedValue({}),
   };
 });
@@ -50,125 +39,6 @@ function setPending(reqs: AgentRequest[]): void {
     blockingPending: reqs.find((r) => r.blocking) ?? null,
   });
 }
-
-const baseEnhanceRequest: AgentRequest = {
-  id: "request-42",
-  from: "archivist",
-  channel: "general",
-  kind: "enhance_skill_proposal",
-  status: "pending",
-  title: 'Enhance "send-digest" with new content',
-  question:
-    "@archivist drafted **send-newsletter**, but it looks similar to existing skill **send-digest**.",
-  options: [
-    {
-      id: "enhance",
-      label: "Enhance existing",
-      description: "Fold this into send-digest. The candidate is dropped.",
-    },
-    {
-      id: "approve_anyway",
-      label: "Approve anyway",
-      description: "Bypass the similarity gate and create a new skill.",
-    },
-    {
-      id: "reject",
-      label: "Reject",
-      description: "Drop this draft. The existing skill stays unchanged.",
-    },
-  ],
-  recommended_id: "enhance",
-  blocking: false,
-  reply_to: "send-newsletter",
-  metadata: {
-    enhances_slug: "send-digest",
-    similar_to_existing: {
-      slug: "send-digest",
-      score: 0.92,
-      method: "embedding-cosine",
-    },
-  },
-  enhance_candidate: {
-    name: "send-newsletter",
-    description: "Send out the customer newsletter every Friday.",
-    content: "## Steps\n1. ...",
-  },
-  created_at: "2026-04-29T10:00:00Z",
-};
-
-const ambiguousRequest: AgentRequest = {
-  id: "request-43",
-  from: "archivist",
-  channel: "general",
-  kind: "skill_proposal",
-  status: "pending",
-  title: "Approve skill: send-newsletter",
-  question:
-    "@archivist proposed skill **send-newsletter**: Send the customer newsletter.",
-  options: [
-    { id: "accept", label: "Accept" },
-    { id: "reject", label: "Reject" },
-  ],
-  recommended_id: "accept",
-  blocking: false,
-  reply_to: "send-newsletter",
-  metadata: {
-    similar_to_existing: {
-      slug: "send-digest",
-      score: 0.78,
-      method: "embedding-cosine",
-    },
-  },
-  created_at: "2026-04-29T10:00:00Z",
-};
-
-describe("<InterviewBar> enhance UX", () => {
-  it("renders three-button row for enhance_skill_proposal kind", () => {
-    setPending([baseEnhanceRequest]);
-    render(wrap(<InterviewBar />));
-    expect(
-      screen.getByRole("button", { name: /Enhance existing/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Approve anyway/i }),
-    ).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /Reject/i }).length).toBe(1);
-  });
-
-  it("renders the inline compare preview for enhance kind", () => {
-    setPending([baseEnhanceRequest]);
-    render(wrap(<InterviewBar />));
-    // Both panel headings appear; "Existing" + "Candidate".
-    expect(screen.getAllByText(/Existing/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Candidate/).length).toBeGreaterThan(0);
-    // Score line is shown.
-    expect(screen.getByText(/Similarity score/i)).toBeInTheDocument();
-  });
-
-  it("renders the similar banner for ambiguous skill_proposal", () => {
-    setPending([ambiguousRequest]);
-    render(wrap(<InterviewBar />));
-    expect(screen.getByText(/Similar to/)).toBeInTheDocument();
-    // Score is rendered to 2 decimals.
-    expect(screen.getByText(/0\.78/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Compare/i }),
-    ).toBeInTheDocument();
-    // Standard accept/reject options remain.
-    expect(screen.getByRole("button", { name: /Accept/i })).toBeInTheDocument();
-  });
-
-  it("does NOT show the similar banner for clean skill_proposal", () => {
-    const clean: AgentRequest = {
-      ...ambiguousRequest,
-      id: "request-44",
-      metadata: undefined,
-    };
-    setPending([clean]);
-    render(wrap(<InterviewBar />));
-    expect(screen.queryByText(/Similar to/)).not.toBeInTheDocument();
-  });
-});
 
 describe("<InterviewBar> approval UX", () => {
   it("renders EXTERNAL ACTION badge and structured details for approval kind", () => {
@@ -301,5 +171,138 @@ describe("<InterviewBar> approval UX", () => {
         "Ask whether the buyer has budget authority.",
       );
     });
+  });
+});
+
+describe("<InterviewBar> notice framing (N8)", () => {
+  const notice: AgentRequest = {
+    id: "request-notice-1",
+    from: "ae",
+    channel: "task-office-2",
+    kind: "notice",
+    status: "pending",
+    title: "OFFICE-4 delivered",
+    question:
+      "Renewal sequences delivered: 3 sequences ready — artifact: agents/ae/notebook/renewal-sequences.md",
+    options: [{ id: "acknowledge", label: "Acknowledge" }],
+    recommended_id: "acknowledge",
+    blocking: false,
+    created_at: "2026-06-10T00:00:00Z",
+  };
+
+  it("labels kind=notice rows NOTICE and never says 'asks'", () => {
+    setPending([notice]);
+    render(wrap(<InterviewBar />));
+
+    expect(screen.getByText("NOTICE")).toBeInTheDocument();
+    expect(screen.queryByText("INTERVIEW")).not.toBeInTheDocument();
+    expect(screen.queryByText(/asks/)).not.toBeInTheDocument();
+    expect(screen.getByText("from @ae")).toBeInTheDocument();
+    expect(screen.getByText("OFFICE-4 delivered")).toBeInTheDocument();
+  });
+
+  it("keeps INTERVIEW framing with 'asks' for real interview kinds", () => {
+    const interview: AgentRequest = {
+      id: "request-real-interview",
+      from: "ceo",
+      channel: "task-office-2",
+      kind: "interview",
+      status: "pending",
+      question: "Who should own the Acme renewal?",
+      options: [{ id: "answer_directly", label: "Answer directly" }],
+      blocking: false,
+      created_at: "2026-06-10T00:00:00Z",
+    };
+    setPending([interview]);
+    render(wrap(<InterviewBar />));
+
+    expect(screen.getByText("INTERVIEW")).toBeInTheDocument();
+    expect(screen.queryByText("NOTICE")).not.toBeInTheDocument();
+    expect(screen.getByText("@ceo asks")).toBeInTheDocument();
+  });
+
+  it("still lets the human acknowledge a notice", () => {
+    setPending([notice]);
+    render(wrap(<InterviewBar />));
+    expect(
+      screen.getByRole("button", { name: /Acknowledge/i }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("<InterviewBar> pinned ordering (v3 buried-interview fix)", () => {
+  const makeRequest = (over: Partial<AgentRequest>): AgentRequest => ({
+    id: "request-0",
+    from: "ae",
+    channel: "general",
+    kind: "notice",
+    status: "pending",
+    question: "placeholder",
+    options: [{ id: "acknowledge", label: "Acknowledge" }],
+    blocking: false,
+    created_at: "2026-06-11T00:00:00Z",
+    ...over,
+  });
+
+  it("pins a blocking ask above older notices and interviews", () => {
+    // The live v3 run buried a blocking interview behind a pile of older
+    // delivery notices for 44 minutes — the bar must show the blocking
+    // ask FIRST regardless of created_at.
+    const oldNotice = makeRequest({
+      id: "request-1",
+      kind: "notice",
+      question: "OFFICE-4 delivered.",
+      created_at: "2026-06-11T00:00:00Z",
+    });
+    const oldInterview = makeRequest({
+      id: "request-2",
+      kind: "interview",
+      question: "Which tone do you prefer?",
+      options: [{ id: "answer_directly", label: "Answer directly" }],
+      created_at: "2026-06-11T00:01:00Z",
+    });
+    const newBlocking = makeRequest({
+      id: "request-3",
+      kind: "approval",
+      question: "Send the three renewal emails now?",
+      options: [
+        { id: "approve", label: "Approve" },
+        { id: "reject", label: "Reject" },
+      ],
+      blocking: true,
+      created_at: "2026-06-11T00:30:00Z",
+    });
+    setPending([oldNotice, oldInterview, newBlocking]);
+    render(wrap(<InterviewBar />));
+
+    expect(screen.getByText("BLOCKING")).toBeInTheDocument();
+    expect(
+      screen.getByText("Send the three renewal emails now?"),
+    ).toBeInTheDocument();
+    // 1/3 — the blocking ask is the FIRST card in the queue.
+    expect(screen.getByText("1/3")).toBeInTheDocument();
+  });
+
+  it("ranks interviews above notices when nothing blocks", () => {
+    const oldNotice = makeRequest({
+      id: "request-1",
+      kind: "notice",
+      question: "OFFICE-4 delivered.",
+      created_at: "2026-06-11T00:00:00Z",
+    });
+    const newerInterview = makeRequest({
+      id: "request-2",
+      kind: "interview",
+      question: "Two things needed before I queue the sends.",
+      options: [{ id: "answer_directly", label: "Answer directly" }],
+      created_at: "2026-06-11T00:10:00Z",
+    });
+    setPending([oldNotice, newerInterview]);
+    render(wrap(<InterviewBar />));
+
+    expect(
+      screen.getByText("Two things needed before I queue the sends."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
   });
 });

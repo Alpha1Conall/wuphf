@@ -113,6 +113,7 @@ type Broker struct {
 	humanSessions       []humanSession
 	humanSessionRevoke  map[string]chan struct{} // session ID → closed on revoke
 	actions             []officeActionLog
+	distillInFlight     map[string]struct{}
 	signals             []officeSignalRecord
 	decisions           []officeDecisionRecord
 	watchdogs           []watchdogAlert
@@ -178,11 +179,14 @@ type Broker struct {
 	scanTracker             *scanStatusTracker
 	nextSubscriberID        int
 	agentStreams            map[string]*agentStreamBuffer
-	mu                      sync.Mutex
-	officeMemberMutationMu  sync.Mutex
-	stateWriteMu            sync.Mutex
-	stateWriteSeq           atomic.Uint64
-	stateWriteApplied       atomic.Uint64
+	// mu is the broker's single big lock. contendedMutex == sync.Mutex
+	// semantics plus sampled slow-wait logging (broker_mutex.go) so a
+	// long holder wedging every endpoint is visible in the log.
+	mu                     contendedMutex
+	officeMemberMutationMu sync.Mutex
+	stateWriteMu           sync.Mutex
+	stateWriteSeq          atomic.Uint64
+	stateWriteApplied      atomic.Uint64
 	// configMu serializes handleConfig POST reads/writes so concurrent
 	// /config calls don't corrupt ~/.wuphf/config.json. config.Save uses
 	// os.WriteFile (O_TRUNC) without locking, so two parallel POSTs can
@@ -258,18 +262,6 @@ type Broker struct {
 	skillCompileInflight  bool
 	skillCompileCoalesced bool
 	skillScanner          *SkillScanner
-	// Skill synthesizer (Stage B) plumbing. Same coalesce semantics as
-	// Stage A; metrics + counters live on skillCompileMetrics.StageBProposalsTotal.
-	skillSynthesizer    *SkillSynthesizer
-	skillSynthInflight  bool
-	skillSynthCoalesced bool
-	// Hermes-style per-agent activity counter (Stage B'). Increments on
-	// every agent MCP tool call; resets on team_skill_create / team_skill_patch;
-	// fires a "skill_review_nudge" task when the threshold is crossed. Owns
-	// its own mutex so it can be hit from the tool-event hot path without
-	// blocking on b.mu. Lazily constructed by ensureSkillCounter so tests
-	// that never spawn a real agent pay no cost.
-	skillCounter *SkillCounter
 	// recentlyRejectedSkills holds in-memory snapshots of skills rejected in
 	// the last 60s so /skills/reject/undo can restore them. Keyed by undo
 	// token. Guarded by b.mu. See skill_crud_endpoints.go for GC semantics.
@@ -561,6 +553,10 @@ func (b *Broker) StartOnPort(port int) error {
 	mux.HandleFunc("/reactions", b.requireAuth(b.handleReactions))
 	mux.HandleFunc("/notifications/nex", b.requireAuth(b.handleNexNotifications))
 	mux.HandleFunc("/office-members", b.requireAuth(b.handleOfficeMembers))
+	// Single derived-stats source: every surface-level count (header
+	// strip, board lane headers, dashboard tiles, inbox badge, wiki
+	// home) reads this one endpoint so the numbers cannot drift.
+	mux.HandleFunc("/office/stats", b.requireAuth(b.handleOfficeStats))
 	mux.HandleFunc("/office-members/generate", b.requireAuth(b.handleGenerateMember))
 	mux.HandleFunc("/channels", b.requireAuth(b.handleChannels))
 	mux.HandleFunc("/channels/dm", b.requireAuth(b.handleCreateDM))
@@ -655,6 +651,7 @@ func (b *Broker) StartOnPort(port int) error {
 	mux.HandleFunc("/reset", b.requireAuth(b.handleReset))
 	mux.HandleFunc("/reset-dm", b.requireAuth(b.handleResetDM))
 	mux.HandleFunc("/policies", b.requireAuth(b.handlePolicies))
+	mux.HandleFunc("/policies/", b.requireAuth(b.handlePoliciesSubpath))
 	mux.HandleFunc("/signals", b.requireAuth(b.handleSignals))
 	mux.HandleFunc("/decisions", b.requireAuth(b.handleDecisions))
 	mux.HandleFunc("/watchdogs", b.requireAuth(b.handleWatchdogs))
@@ -836,8 +833,7 @@ func (b *Broker) Stop() {
 // to the attacker's origin. Validate both RemoteAddr AND Host here.
 
 // SSE handlers and the tool-event audit channel (handleEvents,
-// handleAgentStream, handleAgentToolEvent, recordAgentToolEvent,
-// SkillCounter helpers) moved to broker_sse.go.
+// handleAgentStream, handleAgentToolEvent) moved to broker_sse.go.
 
 // ServeWebUI starts a static file server for the web UI on the given port.
 // Returns an error if the port cannot be bound (e.g. already in use).
