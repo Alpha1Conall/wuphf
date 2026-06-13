@@ -45,6 +45,7 @@ import PageStatsPanel from "./PageStatsPanel";
 import PlaybookExecutionLog from "./PlaybookExecutionLog";
 import PlaybookSkillBadge from "./PlaybookSkillBadge";
 import ReferencedBy from "./ReferencedBy";
+import RequestAIChangeControl from "./RequestAIChangeControl";
 import SeeAlso from "./SeeAlso";
 import type { SourceItem } from "./Sources";
 import Sources from "./Sources";
@@ -54,7 +55,6 @@ import { WIKI_TREE_QUERY_KEY } from "./tree/WikiTree";
 import VersionHistory from "./VersionHistory";
 import WikiEditor from "./WikiEditor";
 import WikiMaintenanceAssistant from "./WikiMaintenanceAssistant";
-import WikiNavRail from "./WikiNavRail";
 import { categoryPath } from "./wikiPaths";
 
 const STALENESS_STALE_DAYS = 30;
@@ -521,41 +521,35 @@ export default function WikiArticle({
 
   if (tab === "edit") {
     return (
-      <>
-        <WikiNavRail activePath={path} onNavigate={onNavigate} />
-        <main
-          className="wk-article-col wk-article-col--editing"
-          aria-label={`Editing ${article.title}`}
-        >
-          <LiveEditingBanner liveAgent={liveAgent} article={article} />
-          <HatBar
-            active={tab}
-            onChange={setTab}
-            rightRail={context ? [context] : undefined}
-          />
-          <ArticleTabPanels
-            tab={tab}
-            article={article}
-            catalog={catalog}
-            resolver={resolver}
-            onNavigate={onNavigate}
-            onEditSection={() => setTab("edit")}
-            visualArtifact={visualArtifact}
-            inlineArtifacts={inlineArtifacts}
-            onEditorSaved={handleEditorSaved}
-            onEditorCancel={handleEditorCancel}
-            onVersionRestored={handleVersionRestored}
-          />
-        </main>
-      </>
+      <main
+        className="wk-article-col wk-article-col--editing"
+        aria-label={`Editing ${article.title}`}
+      >
+        <LiveEditingBanner liveAgent={liveAgent} article={article} />
+        <HatBar
+          active={tab}
+          onChange={setTab}
+          rightRail={context ? [context] : undefined}
+        />
+        <ArticleTabPanels
+          tab={tab}
+          article={article}
+          catalog={catalog}
+          resolver={resolver}
+          onNavigate={onNavigate}
+          onEditSection={() => setTab("edit")}
+          visualArtifact={visualArtifact}
+          inlineArtifacts={inlineArtifacts}
+          onEditorSaved={handleEditorSaved}
+          onEditorCancel={handleEditorCancel}
+          onVersionRestored={handleVersionRestored}
+        />
+      </main>
     );
   }
 
   return (
     <>
-      <WikiNavRail activePath={path} onNavigate={onNavigate}>
-        <ArticleContents entries={toc} />
-      </WikiNavRail>
       <main className="wk-article-col">
         <div className="wk-article-page">
           <LiveEditingBanner liveAgent={liveAgent} article={article} />
@@ -569,16 +563,28 @@ export default function WikiArticle({
             onChange={setTab}
             rightRail={context ? [context] : undefined}
           />
-          <ArticleDeleteControl
-            title={article.title}
-            path={article.path}
-            onDeleted={() => onNavigate("")}
-          />
-          <ArticleBreadcrumb
-            article={article}
-            segments={breadcrumbSegments}
-            onNavigate={onNavigate}
-          />
+          {/* One clean header row: breadcrumb left (single line, middle
+              segments truncate), page actions right. The title sits BELOW
+              on its own line — previously the two floated toolbars
+              overlapped the wrapping breadcrumb. */}
+          <div className="wk-article-header" data-testid="wk-article-header">
+            <ArticleBreadcrumb
+              article={article}
+              segments={breadcrumbSegments}
+              onNavigate={onNavigate}
+            />
+            <div className="wk-article-actions">
+              <RequestAIChangeControl
+                title={article.title}
+                path={article.path}
+              />
+              <ArticleDeleteControl
+                title={article.title}
+                path={article.path}
+                onDeleted={() => onNavigate("")}
+              />
+            </div>
+          </div>
           <ArticleTitle title={article.title} />
           {byline}
           <ArticleBadges article={article} />
@@ -625,6 +631,7 @@ export default function WikiArticle({
       </main>
       <ArticleRightSidebar
         article={article}
+        toc={toc}
         onNavigate={onNavigate}
         onMaintenanceApplied={() => setRefreshNonce((n) => n + 1)}
       />
@@ -856,8 +863,11 @@ function ArticleBreadcrumb({
   segments: string[];
   onNavigate: (path: string) => void;
 }) {
+  // The repo-root "team" segment is plumbing, not a space — docmost-style
+  // breadcrumbs read "space / parent / page".
+  const displaySegments = segments[0] === "team" ? segments.slice(1) : segments;
   return (
-    <div className="wk-breadcrumb">
+    <nav className="wk-breadcrumb" aria-label="Breadcrumb">
       <a
         href="#/wiki"
         onClick={(e) => {
@@ -865,32 +875,34 @@ function ArticleBreadcrumb({
           onNavigate("");
         }}
       >
-        Team Wiki
+        Wiki
       </a>
-      {keyedByOccurrence(segments, (seg) => seg).map(
+      {keyedByOccurrence(displaySegments, (seg) => seg).map(
         ({ key, value: seg, index: i }) => (
           <span key={key} style={{ display: "contents" }}>
-            <span className="sep">›</span>
-            {i < segments.length - 1 ? (
+            <span className="sep" aria-hidden="true">
+              /
+            </span>
+            {i < displaySegments.length - 1 ? (
               // Middle segments are path kinds (companies, people, …) —
-              // they link to the auto-generated category index page, not
-              // a folder. The leading "team" segment goes home.
+              // the wiki's "spaces". They link to the auto-generated
+              // category index page, not a folder.
               <a
-                href={seg === "team" ? "#/wiki" : `#/wiki/${categoryPath(seg)}`}
+                href={`#/wiki/${categoryPath(seg)}`}
                 onClick={(e) => {
                   e.preventDefault();
-                  onNavigate(seg === "team" ? "" : categoryPath(seg));
+                  onNavigate(categoryPath(seg));
                 }}
               >
                 {seg}
               </a>
             ) : (
-              <span>{article.title}</span>
+              <span aria-current="page">{article.title}</span>
             )}
           </span>
         ),
       )}
-    </div>
+    </nav>
   );
 }
 
@@ -1034,10 +1046,12 @@ function SourcesPanel({
 
 function ArticleRightSidebar({
   article,
+  toc,
   onNavigate,
   onMaintenanceApplied,
 }: {
   article: WikiArticleT;
+  toc: TocEntry[];
   onNavigate: (path: string) => void;
   onMaintenanceApplied: () => void;
 }) {
@@ -1062,6 +1076,7 @@ function ArticleRightSidebar({
   }, [article.path]);
   return (
     <aside className="wk-right-sidebar">
+      <ArticleContents entries={toc} />
       <PageStatsPanel
         revisions={article.revisions}
         contributors={article.contributors.length}

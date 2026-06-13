@@ -3629,6 +3629,12 @@ button.verification-badge {
   gap: 12px;
   margin-top: 8px;
 }
+/* Ownerless ("auto") task awaiting CEO staffing — honest in-progress copy
+ * next to the owner pill so the page never reads as "parked on you". */
+.issue-doc-staffing-note {
+  font-size: var(--text-sm);
+  color: var(--accent);
+}
 .issue-doc-owner-pill {
   appearance: none;
   display: inline-flex;
@@ -5422,22 +5428,6 @@ button.verification-badge {
   flex: 1 1 auto;
   min-height: 0;
   padding: 12px 20px 16px;
-}
-/* Drafting "waiting on you" hint (ICP eval N5): the task only moves
- * forward when the human presses Approve & Start, so say it inline at
- * the top of the chat instead of leaving a dead-quiet screen. */
-.issue-doc-waiting-hint {
-  flex: 0 0 auto;
-  margin: 12px 20px 0;
-  padding: 8px 12px;
-  font-size: 0.8125rem;
-  color: var(--text-secondary);
-  background: var(--bg-warm, var(--bg-card));
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md, 6px);
-}
-.issue-doc-waiting-hint strong {
-  color: var(--text);
 }
 
 .task-context-rail {

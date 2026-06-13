@@ -146,19 +146,6 @@ func newOfficeEvalFixture(dir string) (*officeEvalFixture, error) {
 	}, nil
 }
 
-// activateTask passes the human Approve & Start gate for a Drafting task the
-// way the live FE does (human approve → drafting→running). Tasks created via
-// MutateTask action=create land in Drafting, and completion or review-
-// submission from a pre-start state is impossible by contract (ICP-eval v3
-// fix family #1) — eval flows that drive work must pass the gate first, the
-// same as live users.
-func (fx *officeEvalFixture) activateTask(taskID string) error {
-	_, err := fx.broker.MutateTask(TaskPostRequest{
-		Action: "approve", ID: taskID, Channel: "general", CreatedBy: "human",
-	})
-	return err
-}
-
 // seedWikiFile materializes a deliverable file under the fixture's wiki
 // root so the B5 artifact-existence gate (knowledge-integrity) sees a real
 // file — done now requires the artifact to exist, not just be named. Plain
@@ -226,8 +213,10 @@ func RunOfficeEvals(dir string) (*OfficeEvalReport, error) {
 		{"live-paths", evalJobLivePaths},
 		{"workspace-isolation", evalJobWorkspaceIsolation},
 		{"utterance-routing", evalJobUtteranceRouting},
+		{"interview-dedupe", evalJobInterviewDedupe},
 		{"task-integrity", evalJobTaskIntegrity},
 		{"knowledge-integrity", evalJobKnowledgeIntegrity},
+		{"review-change-tasks", evalJobReviewChangeTasks},
 		{"scheduler-truth", evalJobSchedulerTruth},
 		{"human-boundary", evalJobHumanBoundary},
 		{"platform-honesty", evalJobPlatformHonesty},
@@ -280,9 +269,6 @@ func evalJobLifecycleBasic(fx *officeEvalFixture, r *OfficeEvalReport) error {
 		VerificationKind: "command", VerificationSpec: "test -f proof.txt", VerificationRequired: true,
 	})
 	if err != nil {
-		return err
-	}
-	if err := fx.activateTask(gated.Task.ID); err != nil {
 		return err
 	}
 	_, completeErr := fx.broker.MutateTask(TaskPostRequest{Action: "complete", ID: gated.Task.ID, Channel: "general", CreatedBy: "eng"})
@@ -624,9 +610,6 @@ func evalJobCompoundingLoop(fx *officeEvalFixture, r *OfficeEvalReport) error {
 		VerificationKind: "command", VerificationSpec: "exit 0", VerificationRequired: true,
 	})
 	if err != nil {
-		return err
-	}
-	if err := fx.activateTask(created.Task.ID); err != nil {
 		return err
 	}
 	if _, err := fx.broker.MutateTask(TaskPostRequest{Action: "complete", ID: created.Task.ID, Channel: "general", CreatedBy: "eng"}); err != nil {
