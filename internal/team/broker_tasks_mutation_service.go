@@ -755,6 +755,7 @@ func (b *Broker) MutateTask(body TaskPostRequest) (TaskResponse, error) {
 			WorktreePath:     strings.TrimSpace(body.WorktreePath),
 			WorktreeBranch:   strings.TrimSpace(body.WorktreeBranch),
 			DependsOn:        trimTaskDependencies(body.DependsOn),
+			WikiRefs:         dedupePaths(body.WikiRefs),
 			ParentIssueID:    strings.TrimSpace(body.ParentIssueID),
 			Verification:     verification,
 			CreatedAt:        now,
@@ -1259,6 +1260,20 @@ func (b *Broker) MutateTask(body TaskPostRequest) (TaskResponse, error) {
 		}
 		if taskType := strings.TrimSpace(body.TaskType); taskType != "" {
 			task.TaskType = taskType
+		}
+		if len(body.WikiRefs) > 0 {
+			// Wiki links shape a task's wiki-egress boundary, so mutating them is
+			// a CURATOR action (CEO / human / Librarian) — the same authority the
+			// link_task_wiki tool requires. This generic update path is reachable
+			// via the universally-open `comment` action, so without a gate here a
+			// specialist could relabel a task's wiki egress by attaching WikiRefs
+			// to a note. Non-curators' WikiRefs are ignored (the other optional
+			// fields here follow the same silently-skip pattern). Replace
+			// semantics: the caller sends the full set; dedupePaths normalizes.
+			actorSlug := strings.ToLower(strings.TrimSpace(actor))
+			if isHumanMessageSender(actorSlug) || actorSlug == "ceo" || isLibrarianSlug(actorSlug) {
+				task.WikiRefs = dedupePaths(body.WikiRefs)
+			}
 		}
 		if pipelineID := strings.TrimSpace(body.PipelineID); pipelineID != "" {
 			task.PipelineID = pipelineID
