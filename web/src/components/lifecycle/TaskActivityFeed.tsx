@@ -117,7 +117,9 @@ function ActivityRow({ event }: { event: TaskActivityEvent }) {
 
   const handleClick = () => {
     if (!isOpenRequest) return;
-    void router.navigate({ to: "/inbox" });
+    // Open requests live in the board's "Needs human input" lane now that
+    // the standalone Inbox was consolidated into /tasks.
+    void router.navigate({ to: "/tasks" });
   };
 
   return (
@@ -233,11 +235,11 @@ function RequestResolution({
       </div>
     );
   }
-  // Open — clickable into Inbox.
+  // Open — clickable into the Tasks board (Needs human input lane).
   return (
     <div className="issue-activity-feed-resolution issue-activity-feed-resolution--open">
       <HelpCircle width={12} height={12} aria-hidden="true" />
-      <span>Open — answer in Inbox →</span>
+      <span>Open — answer in Tasks →</span>
     </div>
   );
 }
